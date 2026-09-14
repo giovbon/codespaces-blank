@@ -20,24 +20,26 @@ graph LR
   H -.-> I[Undo do lote]
 ```
 
-O núcleo (`packages/import-core`) é **puro e isomórfico**: os estágios 1 a 5 correm no servidor e, para ficheiros grandes, também num *web worker* no browser, produzindo exatamente o mesmo resultado. A pré-visualização local é instantânea; o *commit* é autoritativo no servidor.
+O núcleo (`internal/adapters` + `internal/modules/imports`) corre **exclusivamente no servidor**, em Go. Não existe versão para o browser: a pré-visualização é calculada no servidor e devolvida como fragmento HTML, com progresso por SSE. Isto elimina o *web worker*, o pacote isomórfico e a disciplina de «pureza» que os acompanhava (ver ADR-001 e ADR-012 revistos).
+
+**Este documento descreve os estágios 2 a 7, que são agnósticos ao formato.** CSV, OFX e CAMT.053 convergem no mesmo `RawRow{LineNo, Cells[], RawRef}` e percorrem o mesmo pipeline a partir do estágio 2. As particularidades de cada fonte — roteamento por conteúdo, cartões, faturas e cobertura — estão em [07-muitas-contas-e-cartoes.md](07-muitas-contas-e-cartoes.md). **PDF está fora de âmbito** ([ADR-016](05-decisoes-adr.md#adr-016--pdf-fora-de-âmbito)).
 
 ```mermaid
 sequenceDiagram
   participant U as Utilizador
-  participant API as API Fastify
-  participant IMP as import-core
+  participant API as Servidor Go
+  participant IMP as Pipeline de importacao
   participant DB as SQLite
   participant SSE as Stream SSE
   U->>API: POST /imports com ficheiro e accountId
   API->>DB: criar import_batch status staging
-  API->>IMP: estagios 1 a 5
+  API->>IMP: estagios 1 a 5 (goroutine)
   IMP->>DB: gravar import_rows e diagnosticos
   API-->>U: 202 com batchId
   IMP-->>SSE: progresso por estagio
   SSE-->>U: atualizacoes em tempo real
   U->>API: GET /imports/{id}/preview
-  API-->>U: diff por linha e resumo
+  API-->>U: fragmento HTML com o diff por linha e o resumo
   U->>API: POST /imports/{id}/commit com selecao
   API->>DB: transacao unica e journal de auditoria
   API->>DB: atualizar budget_month_cache
@@ -53,9 +55,10 @@ Quatro origens, todas convergindo no mesmo registo de lote:
 | Origem | Mecanismo | Notas |
 | --- | --- | --- |
 | Upload manual | `POST /imports` (`multipart/form-data`) | *Streaming* direto para `/data/uploads`, nunca em memória |
-| Pasta vigiada | `chokidar` em `/data/inbox/<slug-conta>/` | Vantagem enorme: largar ficheiros por SMB/Nextcloud e o sistema importa sozinho |
-| Email | `imapflow` a cada 15 min, filtrando remetente/assunto | Bancos que enviam extrato por email |
-| API/CLI | `POST /imports` com `Idempotency-Key` | Integração com automações próprias |
+| Pasta vigiada | `fsnotify` em `/data/inbox/` (pasta **única**) | Vantagem enorme: largar ficheiros por SMB/Nextcloud e o sistema importa sozinho. O destino é decidido pelo conteúdo, não pelo nome ([07](07-muitas-contas-e-cartoes.md#3-roteamento-automático-por-conteúdo)) |
+| Email | `emersion/go-imap` a cada 15 min, filtrando remetente/assunto | Bancos que enviam extrato por email — muitas vezes em **OFX**, que é o melhor caso possível |
+| API/CLI | `POST /imports` com `Idempotency-Key`, ou `app import --file` | Integração com automações próprias |
+| Reprocessamento | `POST /imports/{id}/reprocess` sobre um lote existente | Não exige novo *upload*: o original está em `uploads/`. Essencial quando o mapeamento do perfil estava errado (ADR-008, [07](07-muitas-contas-e-cartoes.md)) |
 
 Ações imediatas: calcular `file_sha256`, guardar o ficheiro original intacto em `/data/uploads/<ano>/<mes>/`, e criar `import_batches` com `status='staging'`. O original nunca é apagado — é a prova documental de tudo o que foi importado.
 
@@ -63,15 +66,17 @@ Se o mesmo `file_sha256` já existir para a conta com `status='committed'`, o lo
 
 ---
 
-## 3. Estágio 1 — Parsing
+## 3. Estágio 1 — Deteção de formato e *parsing*
+
+Antes de interpretar, identificar o que o ficheiro é: `<OFX`, `<Document` (CAMT.053), ou texto delimitado. Cada formato tem o seu adapter, mas todos emitem a mesma estrutura `RawRow{LineNo, Cells[], RawRef}`. Os passos abaixo são os do adapter CSV — o mais comum e o que está sempre disponível.
 
 Passos, nesta ordem:
 
-1. **Codificação.** Tentar UTF-8 em modo estrito; se falhar ou produzir caracteres de substituição, degradar para CP1252 e depois ISO-8859-1, com `iconv-lite`. Deteção com `chardet` como heurística de apoio. Registrar `ENCODING_FALLBACK` como aviso — não como erro.
+1. **Codificação.** Tentar UTF-8 em modo estrito (validação com `utf8.Valid`); se falhar ou produzir caracteres de substituição, degradar para CP1252 e depois ISO-8859-1, com `golang.org/x/text/encoding/charmap`. Deteção com `saintfish/chardet` como heurística de apoio. Registar `ENCODING_FALLBACK` como aviso — não como erro.
 2. **Delimitador.** Testar `,`, `;`, tabulação, `|` e `~`. Pontuar pela **consistência** da contagem de campos nas primeiras 20 linhas, respeitando aspas. No Brasil, `;` acompanhado de decimal com vírgula é o caso dominante.
 3. **Linhas de preâmbulo.** Contas brasileiras frequentemente emitem cabeçalhos do tipo `Extrato de conta corrente - Agência 1234`, `Período: 01/08/2025 a 31/08/2025`, linhas em branco, e por vezes rodapés com totais. Deteção: para cada uma das primeiras 15 linhas, pontuar «probabilidade de cabeçalho» (proporção de células textuais não numéricas, presença de sinónimos conhecidos, contagem de campos igual ao corpo). A linha melhor pontuada vira cabeçalho e sugere-se `skip_start_lines`.
-4. **Leitura.** `csv-parse` em modo *stream*, com `bom: true`, `relax_column_count: true`, `skip_empty_lines: true`. Linhas com contagem de colunas divergente geram diagnóstico `RAGGED_ROW` e são mantidas em *staging* para inspeção — nunca descartadas em silêncio.
-5. **Preservação.** Cada linha é gravada em `import_rows.raw_json` exatamente como veio. Nenhuma transformação destrutiva acontece neste estágio.
+4. **Leitura.** `encoding/csv` com `FieldsPerRecord = -1` (aceita contagens divergentes), `LazyQuotes = true` (tolera aspas mal formadas vinda dos bancos) e `TrimLeadingSpace`. `skip_empty_lines` é trivialmente obtido ignorando registos vazios. Linhas com contagem de colunas divergente geram `RAGGED_ROW` e são mantidas em *staging*.
+5. **Preservação.** Cada linha é gravada em `import_rows.raw_json` exatamente como veio. Onde o *parsing* do ficheiro inteiro não for garantido (aspas malformadas, delimitador dentro de aspas, múltiplos delimitadores), usa-se `csv.Reader.InputOffset()` para recuperar os bytes originais, ou uma máquina de estados própria sobre `bufio.Reader`. Nenhuma transformação destrutiva acontece neste estágio.
 
 ---
 
@@ -84,8 +89,9 @@ header_signature = sha1( concat( [ normalize(colName) for colName in header ] ) 
    normalize: minúsculas, sem acentos, sem pontuação, trim
 ```
 
-1. Procurar `import_profiles` por `(account_id, header_signature)` → **acerto exato**: aplicar `mapping_json`, `parse_options_json`, `ignore_rules_json` e `payee_rules_json`, incrementar `hits`.
-2. Sem acerto exato, procurar o perfil mais próximo por similaridade de cabeçalho (`fuzzball.token_sort_ratio >= 0.85`) ou por `bank_slug` conhecido → **acerto aproximado**: usar como sugestão e pedir confirmação única.
+1. Procurar `import_profiles` por `(account_id, source_format, signature)` → **acerto exato**: aplicar `mapping_json`, `parse_options_json`, `ignore_rules_json` e `payee_rules_json`, incrementar `hits`. Em OFX/CAMT, `signature` é o `ACCTID`/`IBAN`; em CSV, o hash das colunas ([07](07-muitas-contas-e-cartoes.md#3-roteamento-automático-por-conteúdo)).
+2. Sem acerto exato, procurar o perfil mais próximo por similaridade de cabeçalho (`strutil` com Jaro-Winkler ou Dice ≥ 0.85) ou por `bank_slug` conhecido → **acerto aproximado**: usar como sugestão e pedir confirmação única.
+3. Sem nada, consultar a **biblioteca de perfis embutida** ([ADR-015](05-decisoes-adr.md#adr-015--biblioteca-de-perfis-embutida-no-repositório)) e, se a instituição estiver coberta, aplicar esse perfil.
 3. Sem nada: **construir perfil por heurística**:
    - Dicionário de sinónimos por campo, sensível ao português:
 
@@ -129,9 +135,11 @@ Formatos: `1.234,56` (pt-BR), `1,234.56` (en-US), `1234.56`, `1234,56`, `1 234,5
 Algoritmo:
 
 1. Inferir separador decimal e de milhar pela distribuição de amostras da coluna (por exemplo, o separador que aparece sempre com exatamente 2 dígitos à direita é o decimal).
-2. Descartar separador de milhar e normalizar para `decimal.js` **apenas na fronteira**.
-3. Converter para inteiro de cêntimos com `Math.round(decimal.mul(100).toNumber())` — nunca com vírgula flutuante intermédia.
+2. Descartar separador de milhar, sinal, sufixo `D`/`C` e parênteses, reduzindo a um par `dígitos` + `marcas`.
+3. **Converter diretamente para `int64` cêntimos, por manipulação de string** — nunca através de `float64`. O parser preenche os centavos com zeros à direita até 2 dígitos e usa `strconv.ParseInt`. `shopspring/decimal` só entra se um dia surgir um caso com mais de 2 casas decimais (cotas de fundos, por exemplo).
 4. Se existir **coluna de saldo**, usar a reconciliação (5.4) para desempatar interpretações divergentes.
+
+Armadilha explícita: `float64` em Go é IEEE-754 binário. `123.45 * 100` devolve `12344.999…`. **Nenhuma conversão monetária pode passar por `float64`** — nem numa expressão intermédia, nem num *cast*.
 
 ### 5.3 Convenções de sinal
 
@@ -250,7 +258,7 @@ Camadas conforme a secção 3 do [modelo de dados](03-modelo-de-dados.md#3-estra
 
 Otimização importante para ARM64: **não fazer uma consulta por linha**. Carregar para memória, uma única vez, todas as transações da conta no intervalo `[min(data) - 7d, max(data) + 7d]`, indexadas por `(date, amount_cents)` num `Map`. O *matching* passa a ser feito em memória; só as escritas vão à base de dados.
 
-Limiar de similaridade de payee: `fuzzball.token_sort_ratio >= 0.85` para fusão automática; entre 0.70 e 0.85, apresentar como «possível duplicado» na pré-visualização e deixar a decisão ao utilizador.
+Limiar de similaridade de payee: Jaro-Winkler ≥ 0.85 (`github.com/adrg/strutil`) para fusão automática; entre 0.70 e 0.85, apresentar como «possível duplicado» na pré-visualização e deixar a decisão ao utilizador. Nota de desempenho: `strutil` calcula sobre `[]rune`, pelo que a comparação deve ser antecedida de um corte barato (primeiros N caracteres ou comprimento) para não comparar todos os pares em contas com dezenas de milhares de transações.
 
 ---
 
@@ -260,20 +268,29 @@ Nada é escrito em `transactions` antes da aprovação (salvo se o perfil tiver 
 
 A resposta de pré-visualização contém, por linha:
 
-```ts
-type PreviewRow = {
-  rowId: string;
-  lineNo: number;
-  status: 'new' | 'duplicate' | 'updated' | 'ignored' | 'error';
-  normalized: { date: string; amountCents: number; payee: string;
-                categoryId: string | null; notes: string | null };
-  matchedTxId?: string;
-  changeSummary?: Record<string, { before: unknown; after: unknown }>;
-  selected: boolean;            // pré-marcado conforme as regras
-  diagnostics: Array<{ level: 'error' | 'warn' | 'info';
-                       code: string; field?: string; message: string }>;
-};
+```go
+type PreviewRow struct {
+    RowID         string
+    LineNo        int
+    Status        RowStatus  // new | duplicate | updated | ignored | error
+    Normalized    Normalized // Date string, AmountCents int64, Payee, CategoryID *string, Notes *string
+    TargetAccountID string   // permite dividir um lote por cartão (ADR-014)
+    MatchedTxID   *string
+    ChangeSummary map[string]Change // antes/depois, para a UI mostrar o que muda
+    Selected      bool       // pré-marcado conforme as regras
+    Diagnostics   []Diagnostic // Level error|warn|info, Code, Field, Message
+}
+
+type Diagnostic struct {
+    Level DiagnosticLevel
+    Code  string // código estável: ver lista abaixo
+    Field string
+    Value string
+    Msg   string
+}
 ```
+
+Cada `Code` é um valor de erro tipado com `errors.Is` — a UI e os testes reagem ao código, nunca ao texto da mensagem.
 
 Cabeçalho do *diff*: total de linhas, novas, atualizadas, ignoradas, erros, intervalo de datas coberto, resultado da reconciliação de saldo, e o perfil aplicado (com botão «editar mapeamento»).
 
@@ -290,6 +307,16 @@ MATCH_EXACT_ID          MATCH_FUZZY              MATCH_AMBIGUOUS
 TRANSFER_PAIRED         BALANCE_MISMATCH         BALANCE_UNAVAILABLE
 IGNORED_SUMMARY_ROW     PAYEE_NORMALIZED         RULE_APPLIED
 CATEGORY_LOW_CONFIDENCE PAYEE_CREATED
+```
+
+Diagnósticos das fontes adicionais (ver [07](07-muitas-contas-e-cartoes.md)):
+
+```
+FORMAT_DETECTED         ROUTED_BY_CONTENT        ROUTING_AMBIGUOUS
+LEDGERBAL_PRESENT       RECONCILE_TOTAL_OK       RECONCILE_TOTAL_MISMATCH
+RECONCILE_EXPLAINED     SUMMARY_BLOCK_IGNORED    INSTALLMENT_FUTURE_USER
+CARD_PAYMENT_MATCHED    CARD_PAYMENT_UNMATCHED   CARD_SECTION_SPLIT
+FITID_PRESENT           FITID_MISSING
 ```
 
 ---
@@ -318,10 +345,10 @@ Esta funcionalidade — decidir «importei o ficheiro errado para a conta errada
 | Cenário | Meta | Estratégia |
 | --- | --- | --- |
 | Ficheiro de 3 000 linhas | < 2 s até à pré-visualização | Parsing em *stream*, carregamento único da janela de *matching* |
-| Ficheiro de 50 000 linhas | < 20 s, UI responsiva | *Worker thread* no servidor, *commit* por blocos de 500, progresso por SSE |
+| Ficheiro de 50 000 linhas | < 20 s, UI responsiva | Goroutine dedicada por importação, *commit* por blocos de 500, progresso por SSE |
 | Reimportação do mesmo ficheiro | < 200 ms | Corte imediato por `file_sha256` |
-| Pré-visualização no browser | Perceção imediata | `import-core` em *web worker*, com o mesmo código do servidor |
-| Memória | < 200 MB de RSS | Nunca carregar o ficheiro completo; limpar estágios intermédios |
+| Pré-visualização de 3 000 linhas | < 2 s no servidor | Medição que invalidou a necessidade de pré-visualização no browser |
+| Memória | < 150 MB de RSS | Nunca carregar o ficheiro completo; limpar estágios intermédios. `GOMEMLIMIT` controla o coletor |
 
 Escritas: `BEGIN IMMEDIATE` com `synchronous = NORMAL` e `busy_timeout = 5000`. Blocos de 500 linhas equilibram desempenho e granularidade de progresso.
 
@@ -329,17 +356,18 @@ Escritas: `BEGIN IMMEDIATE` com `synchronous = NORMAL` e `busy_timeout = 5000`. 
 
 ## 11. Testes
 
-1. **Corpus de regressão**: ficheiros reais anonimizados de cada banco (Nubank, Itaú, Bradesco, Banco do Brasil, Caixa, C6, Inter, cartões), versionados em `packages/import-core/__fixtures__/`.
-2. **Testes *golden* linha-a-linha**: cada *fixture* tem um JSON esperado com datas, valores em cêntimos, payees, categorias e códigos de diagnóstico. Alterações de comportamento aparecem como *diff* revisto em PR.
-3. **Testes de propriedades** (`fast-check`):
+1. **Corpus de regressão**: ficheiros reais anonimizados de cada banco e cartão (Nubank, Itaú, Bradesco, Banco do Brasil, Caixa, C6, Inter, cartões), versionados em `testdata/fixtures/<instituicao>/<formato>/`. Cada *fixture* tem de vir acompanhada do perfil correspondente — sem perfil, não entra (ADR-015).
+2. **Testes *golden* linha-a-linha**: cada *fixture* tem um JSON esperado com datas, valores em cêntimos, payees, categorias e códigos de diagnóstico. Alterações de comportamento aparecem como *diff* revisto em PR. Implementação com `-update` para regenerar e `go-cmp` para comparar.
+3. **Testes de propriedades** (`pgregory.net/rapid`):
    - Importar duas vezes o mesmo ficheiro ⇒ zero novas transações (idempotência).
    - Importar as linhas em ordem aleatória ⇒ mesmo resultado final.
    - `parseAmount` e `formatAmount` são inversos para valores dentro do domínio.
    - O *matcher* nunca devolve duas linhas emparelhadas com a mesma transação.
 4. **Testes adversariais**: ficheiros com codificação mista, aspas soltas, colunas desalinhadas, ficheiros vazios, apenas cabeçalho, valores com `;` dentro de aspas.
-5. **Teste de reconciliação**: *fixture* em que falta uma linha deliberadamente; o motor deve apontar a linha exata da divergência.
+5. **Teste de reconciliação**: *fixture* em que falta uma linha deliberadamente; o motor deve apontar a linha exata da divergência. O mesmo teste deve cobrir a **explicação** da divergência (linha em falta identificada, não apenas «não fecha»).
+6. **Invariante obrigatório de reconciliação**: para todo o corpus com totais declarados, `Σ linhas == total declarado` (saldo, compras ou contagem). É o teste que impede que uma alteração no normalizador passe despercebida ([07](07-muitas-contas-e-cartoes.md#9-reconciliação-declarada-não-só-saldo)).
 
-O corpus é o ativo mais valioso do projeto: é o que impede que uma alteração no normalizador quebre silenciosamente o banco de um utilizador.
+O corpus é o ativo mais valioso do projeto: é o que impede que uma alteração no normalizador quebre silenciosamente o banco de um utilizador. Com Go, corre com `go test ./...` sobre `t.TempDir()` — **sem Docker, sem contentores de teste, sem base de dados externa**.
 
 ---
 
@@ -350,6 +378,8 @@ O corpus é o ativo mais valioso do projeto: é o que impede que uma alteração
 | M2 | CSV genérico, upload, pré-visualização, dedupe, *undo* |
 | M3 | Perfis aprendidos, *inbox* de ficheiros, IMAP, perfis por banco brasileiro, reconciliação de saldo |
 | M3.5 | OFX e CAMT.053 via adapters dedicados (mais fiáveis, trazem `FITID`) |
-| M4 | Regras partilháveis, importação automática total com `auto_commit` para perfis validados |
-| M5 | PDF de extratos (último recurso, bancos que não exportam nada estruturado) |
+| M4 | Regras partilháveis, importação automática total com `auto_commit` para perfis validados; divisão por cartão e parcelas |
+| M5 | Polimento: atalhos, anexos, TOTP/*passkey*, exportação portável |
 | Futuro | *Adapters* de Open Banking (Pluggy, Belvo) por trás da mesma interface |
+
+**Ordem revista em 2026-09-14.** O *inbox* de ficheiros, o painel de cobertura e as contas de cartão sobem para M2/M3 — atacam diretamente o trabalho mensal com muitas contas e cartões. OFX e CAMT.053 entram em **M3.5**: são mais fáceis e mais fiáveis que o CSV, e trazem identificadores estáveis. **Não há fase para PDF** — está fora de âmbito ([ADR-016](05-decisoes-adr.md#adr-016--pdf-fora-de-âmbito)). Detalhe em [07-muitas-contas-e-cartoes.md](07-muitas-contas-e-cartoes.md#11-fases).

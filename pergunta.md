@@ -88,5 +88,3 @@ Ordenado por impacto real:
 | **C — Mínimo de código** | Go + `templ` + HTMX + Tailwind, sem SPA | Queres o menor número de linhas e de peças possível, e aceitas recarregamentos parciais nos ecrãs |
 
 Para uma pessoa só, **B** é o melhor equilíbrio se souberes Go; **C** é o que chega mais depressa a um produto utilizável; **A** é o mais seguro se o teu tempo de aprendizagem for caro.
-
-Uma pergunta para fechar isto: escreves Go ou TypeScript com mais fluência — e preferias uma SPA ou HTML renderizado no servidor? Com a resposta reescrevo o `02-stack.md` e adiciono um ADR-012 a revisitar o ADR-003, em vez de deixar dois caminhos em aberto na documentação.

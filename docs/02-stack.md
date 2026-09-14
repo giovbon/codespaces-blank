@@ -2,10 +2,13 @@
 
 Critério de escolha, por ordem de prioridade:
 
-1. **Corre em ARM64 sem compilação local** (binário pré-compilado, WASM, Go, ou JS puro).
-2. **Tipagem estática forte** e boa integração com TypeScript.
+1. **Corre em ARM64 sem compilação local** — binário pré-compilado, WASM, ou Go puro. Nada que exija *toolchain* de C no host.
+2. **Tipagem estática forte** — o motor de importação lida com formatos ambíguos; os tipos são a primeira linha de defesa.
 3. **Poucas dependências transitivas** — menos superfície de manutenção a longo prazo.
 4. **Longevidade** — projetos ativos, sem dependência de um único mantenedor frágil.
+5. **Respostas prontas na internet** — para um developer a solo que se ausenta e regressa, uma tecnologia popular vale mais do que uma elegante. Este critério é o que decide empates.
+
+Contexto de decisão: [ADR-012](05-decisoes-adr.md#adr-012--go-com-ui-renderizada-no-servidor-templ--htmx--alpinejs) (linguagem e UI), [ADR-013](05-decisoes-adr.md#adr-013--ingestão-por-adapters-csv-ofx-camt053-com-roteamento-por-conteúdo) (ingestão por adapters) e [ADR-016](05-decisoes-adr.md#adr-016--pdf-fora-de-âmbito) (**PDF fora de âmbito**).
 
 ---
 
@@ -13,41 +16,71 @@ Critério de escolha, por ordem de prioridade:
 
 | Camada | Escolha | Justificativa |
 | --- | --- | --- |
-| Backend | **TypeScript 5.x em Node.js 22 LTS** (ou 24 LTS quando estável) | Um só idioma em todo o projeto; `node:sqlite` disponível; *prebuilds* oficiais para `linux-arm64`; partilha de código de domínio com o frontend |
-| Frontend | **TypeScript + React 19** | Ecossistema maduro para tabelas densas, gráficos e acessibilidade |
-| Base de dados | **SQL** (SQLite) | Sem ORM-obrigatório; a linguagem de consulta é o próprio SQL |
-| Automação/CLI | TypeScript com `tsx` | Reutiliza os mesmos pacotes de domínio e importação |
+| Backend | **Go** (versão estável mais recente; `toolchain` fixado em `go.mod`) | Uma linguagem para HTTP, domínio, importação, *jobs* e CLI. Binário único, arranque em milissegundos, RAM em dezenas de MB, concorrência nativa |
+| UI | **HTML renderizado no servidor** — `templ` + HTMX + Alpine.js | Sem SPA, sem *bundler*, sem cliente de API, sem `package.json` |
+| CSS | **Tailwind CSS** com o binário ***standalone*** | Existe para `linux-arm64`; gerado em tempo de *build*. **Sem Node em lado nenhum do projeto** |
+| Base de dados | **SQL** (SQLite) | Sem ORM; a linguagem de consulta é o próprio SQL |
+| Acesso a dados | `database/sql` + SQL escrito à mão | Ver §3 |
+| CLI | Go, no mesmo binário (`app import --file …`) | Reutiliza serviços e domínio; sem segundo *runtime* |
 
-**Porque não Go/Python/Rust no backend?** Seriam mais rápidos ou mais «limpos», mas quebrariam a partilha de código com o browser. O motor de importação precisa de correr *nos dois lados* (preview no browser, commit no servidor); isso é decisivo. Go fica no radar apenas para um utilitário de importação em massa, se algum dia for necessário.
+### Porque não as alternativas
+
+| Alternativa | Porque não |
+| --- | --- |
+| **TypeScript ponta a ponta** | Foi a decisão anterior (ADR-003). O argumento decisivo era o núcleo isomórfico, removido com o ADR-001 revisto. Sem ele, resta RAM 3–5× superior, `node_modules` na imagem, risco de módulos nativos em ARM64 e ausência de binário único. Não é *falso*, é pior em todos os eixos que este projeto valoriza |
+| **Python** | Excelente para *parsing* de PDF e para ML. Nenhum dos dois está no âmbito (ADR-016, ADR-006), e o pipeline real é heurística de texto e aritmética exata — tudo coberto por Go. Um segundo *runtime* quebraria a premissa de operação simples |
+| **Rust** | Desempenho irrelevante aqui (o gargalo é I/O e rede bancária); custo de desenvolvimento e tempo de compilação proibitivos a solo |
+| **Node + SPA (React/Solid)** | Ver ADR-012. Solid em particular: tecnicamente bom, ecossistema insuficiente (gráficos, componentes), e preterido pelo critério 5 |
+| **Java/Kotlin** | Ecossistema maduro, mas peso de JVM e *runtime* desproporcionado num host ARM64 modesto |
+
+### Notas de linguagem relevantes para o domínio
+
+- `int64` explícito em tudo o que é dinheiro. Nunca `float64`, nunca `int` nu em contexto monetário.
+- Datas civis como `string` no formato `YYYY-MM-DD` (ver ADR-005), não `time.Time` com *timezone*.
+- `errors.Is`/`errors.As` com erros sentinela para diagnósticos: cada código de diagnóstico (`BALANCE_MISMATCH`, `DATE_AMBIGUOUS`, `CARD_PAYMENT_UNMATCHED`) é um valor de erro tipado, não uma string comparada.
 
 ---
 
-## 2. Monorepo e build
+## 2. Estrutura do repositório
+
+Um **módulo Go único**. Não há monorepo, nem *workspaces*, nem pacotes publicáveis: o projeto tem um consumidor.
+
+```
+cmd/app/              # main: flag parsing, wiring, arranque
+internal/
+  http/               # rotas, middlewares, handlers, SSE
+  views/              # templates templ: layouts, páginas, fragmentos
+  modules/            # um diretório por módulo de domínio
+    accounts/  transactions/  budgeting/  payees/
+    rules/     imports/       categories/ reports/
+    attachments/ auth/        jobs/       coverage/
+  domain/             # puro, sem I/O: money, dates, budget, recurrence, matcher
+  adapters/           # csv, ofx, camt053 + deteção e roteamento
+  data/               # SQL, repositórios, migrações
+  infra/              # sqlite, log, fila, ficheiros, imap, sse
+profiles/             # biblioteca de perfis por instituição (embed.FS)
+migrations/           # ficheiros .sql numerados, só para a frente
+web/static/           # htmx.min.js, alpine.min.js, app.css gerado (embed.FS)
+testdata/             # fixtures do corpus, por instituição e formato
+```
+
+**Regra de dependência:** `http`/`views` → `modules` → `domain`. `modules` → `data` → `infra`. **`domain` não importa nada de `data`, `infra` ou `http`** — é o que permite testar toda a contabilidade sem base de dados e sem servidor.
+
+### Build
+
+```
+templ generate                          # .templ -> .go
+tailwindcss -i web/src.css -o web/static/app.css --minify
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/app ./cmd/app
+```
+
+Sem Node, sem `package.json`, sem *bundler*. O artefacto é um ficheiro.
 
 | Necessidade | Escolha | Notas |
 | --- | --- | --- |
-| Gestão de workspace | **pnpm workspaces** | *Store* com *hardlinks*, rápido, disciplina de dependências |
-| Orquestração de tarefas | **Turborepo** | *Cache* de builds e execução de tarefas por pacote |
-| Bundler do frontend | **Vite** | *Dev server* instantâneo, HMR, suporte a Web Workers e WASM |
-| Compilação do backend | **tsc** (ou `tsup` para empacotar) | Simples e previsível |
-| Compilação de gramáticas | **Peggy** + pequeno plugin Vite | Necessário para a linguagem de expressões de orçamento |
-| Recolha de tipos | `tsc --noEmit` em CI | Barato e apanha a maioria dos erros |
-
-### Layout do monorepo
-
-```
-apps/
-  server/          # Fastify: API, jobs, motor de importação no servidor, CLI
-  web/             # React SPA + PWA + web worker de importação
-packages/
-  contracts/       # Schemas Zod + tipos de API partilhados
-  domain/          # dinheiro, datas, orçamento, recorrências (puro, sem I/O)
-  rules/           # motor de regras DSL
-  import-core/     # pipeline CSV isomórfico: parse, perfil, normalização, dedupe
-  adapters/        # um módulo por banco: deteção, mapeamento, normalização
-  ui/              # componentes partilhados
-data/              # volume persistente: db.sqlite, uploads/, inbox/, attachments/
-```
+| Runner de tarefas | **`make`** (ou `task`) | Alvos simples: `generate`, `build`, `test`, `lint`, `dev` |
+| Recarregamento em desenvolvimento | `air` ou `go run` + `templ generate --watch` | Binário Go, sem *daemon* de Node |
+| Versão da linguagem | Diretiva `toolchain` em `go.mod` | Reprodutível sem `.nvmrc` |
 
 ---
 
@@ -55,57 +88,74 @@ data/              # volume persistente: db.sqlite, uploads/, inbox/, attachment
 
 | Necessidade | Escolha | Porquê esta, e não outra |
 | --- | --- | --- |
-| Servidor HTTP | **Fastify** | Desempenho, sistema de *plugins*, suporte de primeira classe a *streams* e SSE. Alternativa Hono é mais leve, mas menos «baterias incluídas» |
-| Validação | **Zod** (+ `fastify-type-provider-zod`) | Fonte única de verdade partilhada com o frontend; inferência de tipos automática |
-| Acesso a dados | **Drizzle ORM** sobre `better-sqlite3` | Tipagem em TypeScript, migrações versionadas, e escape fácil para SQL cru (necessário para agregações e para a busca) |
-| Driver SQLite | **better-sqlite3** (primário) / **`node:sqlite`** (alternativa sem dependência nativa) | `better-sqlite3` tem *prebuilds* `linux-arm64`; `node:sqlite` elimina a dependência nativa por completo, ao custo de menor funcionalidade |
-| Migrações | **drizzle-kit** + ficheiros SQL versionados | Revisão de SQL em *pull request*, execução no arranque com *lock* |
-| Jobs em background | **fila persistida em SQLite** + `croner` | Evita Redis. Estados `pending/running/done/failed` com *retry* e *backoff*; agendamento com fuso `America/Sao_Paulo` |
-| Trabalho pesado em CPU | **`node:worker_threads`** | Isola a importação de ficheiros grandes do *event loop* do servidor |
-| Logs | **pino** | JSON estruturado, rápido, baixo *overhead* |
-| Autenticação | **better-auth** ou sessões próprias com **`@node-rs/argon2`** | Argon2id com *prebuilds* `aarch64`; suporte a *passkeys* e TOTP |
-| Email/IMAP | **imapflow** | Puro JS, sem compilação nativa; traz os extratos enviados por email |
-| Watch de ficheiros | **chokidar** | *Inbox* de ficheiros: largar o CSV numa pasta partilhada e ser importado |
-| XML (CAMT.053) | **fast-xml-parser** | ISO 20022 é o formato mais estável de alguns bancos |
+| Servidor HTTP | **`net/http`** (padrão, com *routing* por método e padrão de Go 1.22+) | Suficiente: rotas com parâmetros, *middleware* por composição, SSE com `http.Flusher`. `chi` é a alternativa se os *middlewares* crescerem — mas o padrão elimina uma dependência |
+| Templates | **`github.com/a-h/templ`** | Templates Go tipados, compilados. HTML inválido e campos em falta são erro de compilação, não *runtime* — o equivalente prático do que os tipos davam no frontend |
+| Componentes de UI | Próprios, sobre Tailwind; ícones SVG inline (`lucide`) | Sem biblioteca de componentes a acompanhar; o padrão shadcn (`copiar o markup`) já era este |
+| Validação | `github.com/go-playground/validator` para *structs* de formulário + validação explícita em valores monetários/datas | Dinheiro e datas têm regras próprias: `parseAmount` → `int64` com erro tipado, nunca *coercion* implícita |
+| Driver SQLite | **`modernc.org/sqlite`** (Go puro, sem cgo) | **Zero risco de módulo nativo em ARM64** e *cross-compile* garantido. Alternativa mais ergonómica: `zombiezen.com/go/sqlite` (também sobre `modernc`). `mattn/go-sqlite3` está excluído: exige cgo |
+| Migrações | `github.com/pressly/goose` ou ficheiros `.sql` numerados com *runner* próprio | Revisão de SQL em *pull request*; **apenas migrações para a frente** |
+| Jobs em background | Goroutines + *pool* de tamanho fixo + tabela `jobs` em SQLite | Sem Redis. Estados `pending/running/done/failed`, *retry* com *backoff*. A concorrência trivial é a razão pela qual o Go simplifica aqui |
+| Trabalho pesado | Goroutine dedicada por importação, com progresso por SSE | Substitui o `worker_threads` do plano em Node. Sem `event loop` a bloquear |
+| Logs | `log/slog` (padrão) | JSON estruturado, `requestId` e `batchId` como atributos. Sem dependência |
+| Autenticação | `golang.org/x/crypto/argon2` (Argon2id) + `github.com/alexedwards/scs` para sessões; `github.com/go-webauthn/webauthn` para *passkeys* | Argon2id é puro Go; sessões em *cookie* `HttpOnly`/`SameSite`; TOTP com `github.com/pquerna/otp` |
+| Email / IMAP | `github.com/emersion/go-imap/v2` + `github.com/emersion/go-message` | Puro Go, ativo; traz os extratos enviados por email |
+| Watch de ficheiros | `github.com/fsnotify/fsnotify` | Inbox de ficheiros. Verificar limites de *inotify* com muitas pastas |
+| XML (OFX/CAMT.053) | `encoding/xml` (padrão) | OFX 2.x e CAMT.053 são XML. OFX 1.x é SGML — exige *tokenizer* próprio, pequeno |
+| CSV | `encoding/csv` (padrão) | Ver §4 |
+| Agendamento | `github.com/robfig/cron/v3` sobre a tabela `jobs` | Fuso `America/Sao_Paulo` explícito |
+| Configuração | Variáveis de ambiente + YAML pequeno | Sem framework de configuração |
+| CLI | `flag` (padrão) ou `github.com/spf13/cobra` | No mesmo binário, chamando os mesmos serviços |
 
 ---
 
-## 4. Motor de importação CSV (o diferencial)
+## 4. Motor de importação (o diferencial)
+
+Ordem de fontes: **OFX/CAMT.053 → CSV**. CSV é o núcleo (é o que está sempre disponível); OFX e CAMT são o degrau acima quando a instituição os oferecer, porque trazem identificadores exatos. Contexto e logística em [07-muitas-contas-e-cartoes.md](07-muitas-contas-e-cartoes.md).
 
 | Necessidade | Escolha | Porquê |
 | --- | --- | --- |
-| Parsing CSV no servidor | **csv-parse** | *Streaming*, `relax_column_count`, BOM, tolerância a aspas mal formadas |
-| Parsing no browser | **PapaParse** | Funciona em *web worker*, com *preview* progressivo |
-| Deteção de codificação | **chardet** + **iconv-lite** | Bancos brasileiros emitem com frequência CP1252/ISO-8859-1, não UTF-8 |
-| Deteção de delimitador e de cabeçalho | heurística própria + `csv-sniffer` como referência | Regras de negócio próprias (linhas de preâmbulo, totais) |
-| Datas | **date-fns** | Imutável, modular, com `parse` por formato e validação. Evitar `moment` (legado) e `Date` nativo para datas civis |
-| Decimais | **decimal.js** apenas na fronteira | A conversão `"1.234,56" → 123456` é feita com parser próprio; o resto do sistema só conhece inteiros |
-| Similaridade de *payee* | **fuzzball** (`token_sort_ratio` + `partial_ratio`) | Escolha de limiar e de algoritmo explícita e testável |
-| Normalização de texto | **NFKD** nativo + mapa de sinónimos próprio | Remover acentos e ruído bancário, preservando o texto original para exibição |
-| Parsing de OFX | **ofx-js** / parser próprio | Alternativa ao CSV para bancos que exportam OFX (mais fiável: traz `FITID`) |
-| PDF (fase posterior) | **unpdf** | Puro JS/WASM, sem binários nativos |
+| *Parsing* CSV | **`encoding/csv`** com `FieldsPerRecord = -1` e `LazyQuotes = true`; máquina de estados própria onde for preciso preservar a linha crua | Tolerante a linhas irregulares e aspas soltas sem abortar. `InputOffset()` (Go 1.19+) permite recuperar os bytes originais para `raw_json` |
+| Codificação | `golang.org/x/text/encoding/charmap` + `golang.org/x/text/encoding/unicode` + `github.com/saintfish/chardet` | UTF-8 estrito → CP1252 → ISO-8859-1, com aviso `ENCODING_FALLBACK`. `x/text` é a biblioteca canónica |
+| BOM | `github.com/spkg/bom` (ou 6 linhas próprias) | Trivial |
+| Deteção de delimitador e de cabeçalho | Heurística própria | Regras de negócio próprias (preâmbulos, totais). Não há biblioteca que as saiba |
+| Datas | `time.Parse` com lista explícita de formatos + lógica de ambiguidade própria | `dd/MM` vs `MM/dd` resolve-se por dica de cabeçalho, contexto regional e **oráculo de saldo** — lógica de domínio, não de biblioteca |
+| Decimais | Parser próprio `string → int64` cêntimos; `github.com/shopspring/decimal` só se necessário | O parser para cêntimos é pequeno, testável e elimina uma dependência. Nunca `float64` |
+| Similaridade de *payee* | **`github.com/adrg/strutil`** (Jaro-Winkler, Levenshtein, Dice) e/ou `github.com/xrash/smetrics` (rápido, com Soundex) | Escolha de algoritmo e limiar explícitos e testáveis. Degrau 2 da escada do ADR-006: trigramas + TF-IDF em ~150 linhas próprias |
+| Normalização de texto | `golang.org/x/text/unicode/norm` (NFD + remoção de marcas) + `golang.org/x/text/runes` | Remover acentos só para correspondência, preservando o original para exibição |
+| Regex de ruído | `regexp` (RE2) | **Limitação conhecida: sem *lookaround* nem retroreferências.** Os padrões do domínio (PIX/TED/CNPJ/CPF/`PARCELA n/m`) são todos expressáveis em RE2 |
+| Gramática PEG | **`github.com/mna/pigeon`** | Para as expressões de objetivos do orçamento (ADR-009). Nota: a gramática tem de ser reescrita em sintaxe `pigeon` |
+| OFX | Parser próprio sobre `encoding/xml` (OFX 2.x) e *tokenizer* para OFX 1.x (é SGML, não XML válido) | `FITID` dá deduplicação exata e `ACCTID` dá roteamento exato — o melhor caso possível |
+| CAMT.053 | `encoding/xml` | ISO 20022, XML válido; `AcctSvcrRef` e `IBAN` com o mesmo papel |
+| Deteção de tipo de ficheiro | *magic bytes* próprios + `net/http.DetectContentType` | `<OFX`, `<Document`, ou texto delimitado. **Nunca pelo nome do ficheiro** |
 
-Todas estas bibliotecas são JavaScript puro ou WASM — **nenhuma exige toolchain de compilação em ARM64**.
+**PDF não tem adapters.** Está fora de âmbito por [ADR-016](05-decisoes-adr.md#adr-016--pdf-fora-de-âmbito): nenhuma biblioteca de PDF, nenhum `poppler`, nenhum OCR, nenhuma dependência de sistema no *runtime*. Instituições sem exportação estruturada usam o modo «apenas o total» ([07 §8](07-muitas-contas-e-cartoes.md#8-modo-degradado-apenas-o-total)).
+
+**Reconciliação declarada.** Não é biblioteca, é o mecanismo que torna a importação verificável: usar como invariantes todos os números que a fonte declara (`declared_open + Σ linhas == declared_close`, totais de compra, contagens). Em OFX, `<LEDGERBAL>`/`<AVAILBAL>` dão isto gratuitamente. Explicado em [07 §9](07-muitas-contas-e-cartoes.md#9-reconciliação-declarada-não-só-saldo).
 
 ---
 
 ## 5. Frontend
 
+Sem `package.json`. Os dois ficheiros JS são vendidos no repositório e servidos pelo binário via `embed.FS`.
+
 | Necessidade | Escolha | Porquê |
 | --- | --- | --- |
-| Estado de servidor | **TanStack Query** | *Cache*, invalidação, revalidação e concorrência otimista com pouco código |
-| Estado de UI | **Zustand** | Pequeno e explícito. Evita a cerimónia do Redux do Actual |
-| Rotas | **TanStack Router** | Rotas tipadas, *search params* como estado de filtros (partilhável por URL) |
-| Tabelas | **TanStack Table** + **TanStack Virtual** | Listas de transações com milhares de linhas exigem virtualização |
-| Formulários | **react-hook-form** + **Zod resolver** | Mesmos *schemas* do servidor |
-| Estilo/UI | **Tailwind CSS** + **shadcn/ui** | Velocidade de desenvolvimento e controlo total do markup |
-| Gráficos | **Recharts** | Mesma escolha do Actual; declarativo e suficiente |
-| Datas na UI | **date-fns** | Consistência com o backend |
-| i18n | **i18next** + `react-i18next` | Português (pt-BR/pt-PT) desde o início |
-| PWA | **vite-plugin-pwa** | Instalável no telemóvel com ícone e *cache* de recursos |
-| Ícones | **lucide-react** | Consistente e leve |
+| Templates | **`templ`** | Tipado e compilado; composição por funções Go |
+| Interação | **HTMX** (~14 KB) | Fragmentos de página: filtros, paginação, edição por linha, modais que carregam dados. Elimina a camada de API do cliente |
+| Estado local de UI | **Alpine.js** (~15 KB) | O que o HTMX não faz: `x-show`, separadores, *dropdowns*, modais, célula em edição. **Sem regras de negócio** |
+| Estilo | **Tailwind CSS** + binário *standalone* | Utilitários, sem `node_modules`, sem passo de Node no *build* |
+| Ícones | SVG inline (`lucide`, copiados) | Sem dependência |
+| Gráficos | SVG gerado no servidor para os casos principais; biblioteca JS só onde a interatividade for indispensável | Substitui o Recharts. Aceita-se explicitamente menos polimento |
+| Datas na UI | Formatação em Go (`time`), locale pt-BR | Fonte única: o servidor |
+| i18n | Mapa de strings em Go, com `pt-BR` como base | Uma língua no MVP. Substitui o `i18next` |
+| Atalhos e acessibilidade | HTML semântico, `<dialog>`, atributos ARIA diretos | O navegador dá mais do que se costuma usar |
+| PWA | `manifest.json` + *service worker* mínimo, quando houver tempo | **Fora do MVP** — ver não-objetivos |
 
-**Porque não Next.js?** Não há necessidade de SSR nem de SEO; é uma SPA autenticada. Vite gera um *bundle* estático servido pelo próprio Fastify, mantendo um único processo em ARM64.
+### Limites explícitos desta escolha
+
+- **Nenhuma regra de negócio em JavaScript.** Se uma interação precisar de regra, é porque devia ser um fragmento do servidor.
+- **A grelha de transações resolve-se por paginação e filtragem *server-side***, com edição por linha (`hx-patch`) e Alpine para o modo de edição. **Não** se virtualizam milhares de linhas no cliente.
+- Ecossistema de componentes: próprio. Aceite em troca de não haver *build* de frontend.
 
 ---
 
@@ -113,12 +163,18 @@ Todas estas bibliotecas são JavaScript puro ou WASM — **nenhuma exige toolcha
 
 | Necessidade | Escolha |
 | --- | --- |
-| Testes unitários e de integração | **Vitest** |
-| Testes de propriedades | **fast-check** |
-| E2E | **Playwright** (correr em CI x64; em ARM64 é possível mas pesado) |
-| Lint / format | **ESLint** + **Prettier**; **oxlint** opcional para velocidade |
-| Dependências mortas | **knip** |
-| Cobertura mínima | `import-core` e `domain`: 90%; restante: sem meta rígida |
+| Testes unitários e de integração | **`testing`** (padrão) + `github.com/google/go-cmp` |
+| Testes *golden* | `github.com/gotest.tools/v3/golden` ou comparação própria com `-update` |
+| Testes de propriedades | **`pgregory.net/rapid`** — equivalente Go do `fast-check`, com *shrinking* |
+| Testes de HTTP | `net/http/httptest` (padrão) |
+| Testes de base de dados | SQLite em `t.TempDir()` — **sem Docker, sem contentores de teste** |
+| E2E | `playwright-go` **opcional e depois**; os fluxos críticos são testáveis via `httptest` + *golden* de HTML |
+| Lint / format | **`golangci-lint`** + `gofumpt`; `staticcheck` |
+| Vulnerabilidades | `govulncheck` |
+| Dependências mortas | `go mod tidy` + revisão de `go.mod` (a lista é curta e legível de propósito) |
+| Cobertura mínima | `domain`, `adapters` e `imports`: alta obrigatória. Restante: sem meta rígida |
+
+**O corpus *golden* continua a ser o ativo mais valioso do projeto** — cobre CSV, OFX e CAMT.053 por instituição, com *golden* linha a linha e a reconciliação declarada como teste obrigatório.
 
 ---
 
@@ -126,32 +182,38 @@ Todas estas bibliotecas são JavaScript puro ou WASM — **nenhuma exige toolcha
 
 | Necessidade | Escolha | Notas ARM64 |
 | --- | --- | --- |
-| Contentor | **Docker com `node:22-bookworm-slim` multi-arch** | Evitar Alpine: *prebuilds* de módulos nativos assumem glibc; musl causa recompilação em runtime |
+| Contentor | **Build multi-stage → imagem `distroless/static` (ou `scratch`)** | ~20 MB de binário + ~10 MB de imagem. Sem sistema de operações, sem *shell*, sem *package manager* |
+| Compilação | `CGO_ENABLED=0 go build` | `GOOS=linux GOARCH=arm64` a partir de qualquer máquina. **Sem `buildx` multi-arquitetura** |
+| Ferramentas externas no *runtime* | **Nenhuma** | O binário é o único artefacto. Sem `poppler`, sem `tesseract`, sem OCR — consequência direta do ADR-016 |
 | Reverse proxy + TLS | **Caddy** | Certificados automáticos, configuração de 5 linhas |
 | Backup contínuo | **Litestream** | Binário Go com *release* `linux-arm64`; replica WAL para S3/B2 |
-| Backup periódico | **restic** | Snapshots cifrados de anexos e exportações |
-| Acesso privado | **Tailscale** | Elimina a exposição de portas à internet |
-| Monitorização | *Healthcheck* do Docker + **Uptime Kuma** ou alerta simples por email/Telegram | Evitar stack Prometheus/Grafana no MVP |
-| Atualizações | `docker compose pull && up -d` via *script* ou **Watchtower** com janela de manutenção | Manter *tag* de versão explícita, não `latest` |
+| Backup periódico | **restic** | *Snapshots* cifrados de anexos, uploads e exportações |
+| Acesso privado | **Tailscale** | Elimina exposição de portas à internet |
+| Monitorização | *Healthcheck* do Docker (`/healthz`) + Uptime Kuma ou alerta por email/Telegram | Sem Prometheus/Grafana no MVP |
+| Atualizações | `docker compose pull && up -d` com *tag* explícita | Reversão = mudar a *tag* |
+| Limites de memória | `GOMEMLIMIT=200MiB`, `mem_limit: 256m` | O *runtime* Go respeita o `GOMEMLIMIT` para o coletor. A memória é `page cache` de SQLite mais *heap* pequena |
 
 ### Dependências a evitar explicitamente
 
-| Biblioteca | Motivo para evitar |
+| Dependência | Motivo |
 | --- | --- |
-| `bcrypt` | Compilação nativa; `@node-rs/argon2` tem *prebuilds* `aarch64` |
-| `canvas` / `node-canvas` | Exige `cairo`/`pango`; manutenção penosa |
-| `sharp` | Funciona em ARM64, mas só é necessário se houver redimensionamento de imagens — não é o caso |
-| `moment` | Legado, *bundle* grande; usar `date-fns` |
-| `sql.js` no servidor | Só faz sentido no browser; no Node usar `better-sqlite3`/`node:sqlite` |
-| Prisma | Motor binário pesado e sobreposição com Drizzle; desnecessário neste âmbito |
-| Redis / BullMQ | Serviço extra para uma carga que uma tabela SQLite resolve |
-| `puppeteer` | *Download* de Chromium ARM64 desnecessário no runtime |
+| `mattn/go-sqlite3` | Exige cgo: perde-se o *cross-compile* e o binário estático |
+| Qualquer ORM (GORM, Ent, sqlboiler) | Sobreposição com SQL direto, *magic* de *reflection* e agregações difíceis de escrever. O SQL é explícito em `internal/data` |
+| `lib/pq`/`pgx` | SQLite é a decisão (ADR-002) |
+| Node.js, npm, `package.json`, *bundlers* | Justamente o que a decisão ADR-012 remove |
+| `transformers.js` / ONNX em *runtime* | Reintroduziria um *runtime* JS. IA só *offline*, como ferramenta de *build* (ADR-006) |
+| Bibliotecas de PDF (`pdfium`, `unipdf`, `pdfcpu`) | Fora de âmbito (ADR-016). Nenhuma entra, nem em Go nem em Python |
+| `tesseract` / OCR | Fora de âmbito. Erro elevado em tabelas e ~100 MB de imagem |
+| cgo em geral | Destrói o *cross-compile* e o binário estático. Se um dia for necessário, é uma decisão explícita e isolada |
+| `k8s`/Helm | Não-objetivo |
 
 ---
 
 ## 8. Versões e política de atualização
 
-- `engines.node` fixado no `package.json`; `.nvmrc` no repositório.
-- Dependabot/Renovate **semanal**, com *auto-merge* só para *patches* e apenas com testes verdes.
-- Atualizações de dependência nativa (SQLite) testadas em CI ARM64 antes de entrar em `main`.
-- Imagens Docker com *tag* de versão; a base atualiza-se por PR deliberado, não silenciosamente.
+- Versão de Go fixada na diretiva `toolchain` do `go.mod`.
+- **Renovate ou Dependabot semanal**; *auto-merge* apenas de *patches*, e apenas com testes verdes.
+- `govulncheck` em CI; `golangci-lint` obrigatório.
+- `go.sum` revisto: a lista de dependências diretas deve caber numa página — se não couber, é sinal para reavaliar.
+- Imagens Docker com *tag* de versão explícita (nunca `latest`); a base atualiza-se por *pull request* deliberado.
+- Cliente HTTP dos adapters com `http.Client` próprio, `Timeout` explícito e *retry* com *backoff* apenas em `GET` idempotentes.

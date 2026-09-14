@@ -8,12 +8,12 @@ Objetivo: um serviço que corre meses sem intervenção, que se atualiza sem dor
 
 | Recurso | Mínimo | Recomendado | Justificativa |
 | --- | --- | --- | --- |
-| CPU | 2 núcleos ARM64 (Pi 4 4 GB) | 4 núcleos (Pi 5 8 GB, Ampere, mini-PC ARM) | Importações usam *worker thread*; resto é I/O |
-| RAM | 2 GB | 4–8 GB | Node + SQLite + *cache* de páginas; o pico é o *parsing* de um CSV grande |
-| Armazenamento | 16 GB | SSD de 128 GB+ (USB 3 ou NVMe) | Ficheiros, anexos e backups locais; **evitar cartão SD** pelo desgaste de escrita |
-| Rede | — | Cabo Ethernet | Importações agendadas e IMAP beneficiaram de ligação estável |
+| CPU | 1 núcleo ARM64 (Pi Zero 2 W, Pi 3) | 2–4 núcleos (Pi 4 4 GB, Pi 5 8 GB, mini-PC ARM) | O binário Go é leve; importações correm em goroutines. **Um host de 1 GB passa a ser viável** — era impossível com Node |
+| RAM | 128 MB | 512 MB–1 GB | Binário Go + `page cache` de SQLite. O pico é uma importação de 50 000 linhas, e mesmo essa fica abaixo de 150 MB |
+| Armazenamento | 8 GB | SSD de 64 GB+ (USB 3 ou NVMe) | Ficheiros, anexos e backups locais; **evitar cartão SD** pelo desgaste de escrita |
+| Rede | — | Cabo Ethernet | Importações agendadas e IMAP beneficiam de ligação estável |
 
-Carga esperada: menos de 5% de CPU em regime normal, com picos curtos durante importações. Um Pi 5 sobra largamente.
+Carga esperada: menos de 2% de CPU em regime normal, com picos curtos durante importações. O consumo em repouso do processo é da ordem das dezenas de MB.
 
 ---
 
@@ -25,15 +25,17 @@ Volume único montado em `/data`, versionado com o resto da configuração:
 /data
   db.sqlite            base de dados (mais db.sqlite-wal e db.sqlite-shm)
   uploads/             ficheiros originais de importação, por ano/mês
-  inbox/               pasta vigiada: <slug-conta>/ para importação automática
+  inbox/               pasta vigiada ÚNICA — o destino é decidido pelo conteúdo
   processed/           ficheiros já importados, movidos com o id do lote no nome
-  failed/              ficheiros com erro, preservados para diagnóstico
+  failed/              ficheiros com erro ou sem perfil, preservados para diagnóstico
   attachments/         comprovativos
   exports/             exportações JSON/CSV agendadas
   backups/             VACUUM INTO noturno e snapshots restic
 ```
 
-`uploads/` guarda tudo indefinidamente: é a prova documental de cada importação e permite responder a «porque é que este valor está aqui?» dois anos depois.
+`inbox/` é **uma só pasta**, sem subpastas por conta: arrastar 9 ficheiros para o mesmo sítio é todo o trabalho mensal de entrega. O encaminhamento é feito por *magic bytes* e impressão digital do emissor (ver [07](07-muitas-contas-e-cartoes.md#3-roteamento-automático-por-conteúdo)). Subpastas por conta continuam a funcionar como *override* manual, para quem preferir impor o destino.
+
+`uploads/` guarda tudo indefinidamente: é a prova documental de cada importação, **e é o que permite reprocessar um lote** com um perfil corrigido, sem novo *upload* (ADR-008).
 
 ---
 
@@ -46,24 +48,29 @@ services:
     platform: linux/arm64
     restart: unless-stopped
     environment:
-      NODE_ENV: production
       PORT: "3000"
       DATA_DIR: /data
       TZ: America/Sao_Paulo
       BASE_URL: https://financas.exemplo.pt
       SESSION_SECRET_FILE: /run/secrets/session_secret
       ARGON2_MEMORY_COST: "65536"
+      GOMEMLIMIT: 200MiB
     volumes:
       - /srv/financas/data:/data
     secrets: [session_secret]
     healthcheck:
-      test: ["CMD", "node", "-e",
-             "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      # imagem distroless não tem shell, curl nem wget:
+      # o próprio binário implementa o subcomando de verificação
+      test: ["CMD", "/app/app", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
-    mem_limit: 1536m
+      start_period: 5s                          # arranque é imediato
+    mem_limit: 256m
+    read_only: true
+    tmpfs: [/tmp]                               # espaço temporário com o sistema de ficheiros só de leitura
+    security_opt: ["no-new-privileges:true"]
+    user: "65532:65532"
 
   caddy:
     image: caddy:2-alpine
@@ -102,7 +109,13 @@ financas.exemplo.pt {
 }
 ```
 
-Notas: `mem_limit` impede que uma importação problemática consuma toda a RAM; `TZ` fixa o fuso para os agendamentos; `secrets` evita segredos em variáveis de ambiente visíveis por `docker inspect`.
+Notas:
+
+- `mem_limit: 256m` com `GOMEMLIMIT=200MiB` é suficiente para o pico normal. O `GOMEMLIMIT` faz o coletor do Go trabalhar mais cedo em vez de crescer, evitando `OOM kill`. A memória do SQLite é `page cache` recuperável, não pressão real.
+- `read_only: true` com `tmpfs` em `/tmp` é possível porque o binário é estático e não escreve fora de `/data`.
+- `TZ` fixa o fuso para os agendamentos; `secrets` evita segredos em variáveis de ambiente visíveis por `docker inspect`.
+- **Compromisso de imagem — resolvido.** Com PDF fora de âmbito (ADR-016) não há `poppler` nem `tesseract` a instalar: a imagem final pode ser **`distroless/static`** ou `scratch`, com o binário e mais nada. O tempo em que se ponderava `debian-slim` + `poppler-utils` (~90 MB) desapareceu com a decisão.
+- **Sem Node na imagem.** Não há `node_modules`, nem `npm ci` no `build`, nem `prebuilds` a verificar por arquitetura.
 
 ---
 
@@ -153,8 +166,10 @@ dbs:
 | Acesso público | Fechar a porta 3000 no *host*; única exposição é o proxy com TLS; preferir acesso apenas por **Tailscale** |
 | Autenticação | Argon2id (`m=64 MB, t=3, p=4`), sessões em *cookie* `HttpOnly` + `Secure` + `SameSite=Lax`, `token_hash` na base de dados |
 | Força bruta | *Rate limit* por IP e por conta, bloqueio exponencial após 5 falhas, TOTP ou *passkey* como segundo fator |
-| CSRF | *Token* por sessão em métodos mutantes + `SameSite`; API aceita token por cabeçalho em vez de *cookie* |
-| XSS | Política de segurança de conteúdo estrita no Caddy; sem `innerHTML` no cliente |
+| CSRF | *Token* por sessão em métodos mutantes + `SameSite`; API aceita token por cabeçalho. No HTMX, o token vai num `<meta>` e é injetado globalmente via `hx-headers` no `<body>` — não se esquece nenhuma rota |
+| XSS | Escape automático do `templ` (não existe interpolação crua por omissão) + **CSP estrita** no Caddy |
+| CSP e `unsafe-eval` | **Ponto de atenção real:** o Alpine.js usa `new Function` para avaliar expressões e o HTMX avalia `hx-on`/`hx-vals` com `js:`. Com uma CSP estrita, é preciso usar a **build CSP do Alpine** (`@alpinejs/csp`, expressões sem `eval`) e **desativar `htmx.config.allowEval`**. Alternativa: aceitar `unsafe-eval` — pior, e desnecessário se a primeira opção for adotada desde o início |
+| Conteúdo não confiável na grelha | Dados vindos de extratos são texto, nunca HTML; nenhum fragmento é construído por concatenação de string com dados de ficheiro |
 | Segredos | `docker secrets` ou ficheiros com permissão `600`; nunca em variáveis de ambiente nem no repositório |
 | Dados em repouso | Opcional: SQLCipher (custo de desempenho) ou cifra do volume no *host*. Em ARM64 sem aceleração de AES, medir antes de adotar |
 | Dados em backup | Cifrados pelo restic e pelo Litestream; *bucket* privado com chave de aplicação restrita |
@@ -175,6 +190,10 @@ Dados financeiros pessoais são dados sensíveis: o esforço de proteger deve se
 | Tamanho do WAL | *job* diário | > 100 MB (indica *checkpoint* a falhar) |
 | Falha de importação agendada | estado do *job* `failed` | imediato |
 | Divergência de saldo | `balance_check = 'mismatch'` | resumo diário |
+| Lote em `staging` por aprovar | *job* diário | > 3 dias |
+| Ficheiro de banco que deixou de importar | diagnóstico `ROUTING_AMBIGUOUS` ou `HEADER_ROW_GUESSED` | imediato (indica formato alterado no banco) |
+| Pagamento de fatura não emparelhado | diagnóstico `CARD_PAYMENT_UNMATCHED` | resumo diário (indica fatura em falta) |
+| Conta sem importação no mês | **painel de cobertura** ([07](07-muitas-contas-e-cartoes.md#6-painel-de-cobertura--importei-tudo-este-mês)) | resumo mensal |
 | Erros não tratados | contador em `/metrics` | > 5/hora |
 | Desgaste do armazenamento | SMART quando disponível | setores realocados > 0 |
 
@@ -189,7 +208,7 @@ Canal de alerta: email ou Telegram a partir de um pequeno *script* no próprio h
 docker compose pull
 
 # 2. backup explícito antes de migração de esquema
-docker compose exec app node dist/cli.js db:snapshot
+docker compose exec app /app/app db snapshot
 
 # 3. subir (as migrações correm no arranque, numa transação, com lock)
 docker compose up -d
@@ -204,7 +223,7 @@ Regras:
 - Cada migração é revista como código em PR e testada contra um *dump* anonimizado da base de dados real.
 - Não usar `latest`: uma *tag* de versão permite saber o que está em execução e reverter com precisão.
 - Janela de manutenção não é necessária: o serviço é de um utilizador; alguns segundos de indisponibilidade são aceitáveis.
-- Testar a atualização em ARM64 antes de aplicar em produção: dependências nativas podem ter *prebuilds* apenas para `x64`.
+- **`CGO_ENABLED=0` significa que não há dependências nativas para compilar por arquitetura.** A construção é `GOOS=linux GOARCH=arm64 go build` — sem `buildx`, sem *cross-toolchain*, e sem binários externos no *runtime* (ADR-016).
 
 ---
 
@@ -217,6 +236,10 @@ Regras:
 | Transações a faltar | Consultar `audit_log` por `origin = 'import'` | Usar `undo` do lote suspeito |
 | Duplicados após importação | Verificar `imported_id` nulos nas linhas afetadas | Corrigir perfil (coluna de ID mal mapeada) e reimportar; remover duplicados com a ferramenta de fusão |
 | Saldos errados numa conta | Comparar com extrato; correr verificação de reconciliação | Ajustar via transação de conciliação, não por edição de saldos |
+| Ficheiro de um banco deixou de importar | Ver `import_batches.diagnostics_json` do lote; procurar `ROUTING_AMBIGUOUS` ou `RAGGED_ROW` | Abrir o ecrã de perfil, corrigir o mapeamento e reprocessar o lote — o original está em `uploads/`, não é preciso novo *upload* |
+| Reconciliação «não fecha» numa conta | Ver o diagnóstico explicativo (`RECONCILE_EXPLAINED`) e a linha apontada | Corrigir `ignore_rules_json` (linha-resumo ou bloco de parceladas) e reprocessar |
+| Despesas duplicadas por causa de um cartão | Procurar `CARD_PAYMENT_UNMATCHED` e faturas não importadas | Importar a fatura em falta e reprocessar o lote da conta corrente; o emparelhamento é automático |
+| Ficheiro em `failed/` | Ver o diagnóstico associado ao lote | Sem perfil para essa instituição → criar perfil na biblioteca; voltar a colocar o ficheiro em `inbox/` |
 | Base de dados *locked* | `busy_timeout`, jobs presos em `running` | Matar o *job* obsoleto, libertar `locked_at`; verificar transações longas |
 | Falha de restauro do backup | Verificar integridade com `PRAGMA integrity_check` | Recorrer ao snapshot anterior; registar o incidente |
 

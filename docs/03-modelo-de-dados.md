@@ -38,7 +38,17 @@ CREATE TABLE accounts (
   closed               INTEGER NOT NULL DEFAULT 0,
   sort_order           REAL    NOT NULL DEFAULT 0,
   institution          TEXT,
+  institution_slug     TEXT,             -- 'itau','nubank','c6',... liga à biblioteca de perfis
   account_number_mask  TEXT,
+  external_account_id  TEXT,             -- ACCTID (OFX) ou IBAN (CAMT): roteamento exato de ficheiros
+  -- Campos específicos de cartão de crédito (type = 'credit'); ver ADR-014
+  card_brand           TEXT,             -- 'visa','mastercard','elo','amex','hipercard'
+  card_mask            TEXT,             -- '1234'
+  card_holder          TEXT,             -- 'titular' | 'adicional:<nome>'
+  closing_day          INTEGER,          -- dia de fecho da fatura (1-31)
+  due_day              INTEGER,          -- dia de vencimento (1-31)
+  credit_limit_cents   INTEGER,
+  -- Saldos
   balance_cents        INTEGER,          -- último saldo conhecido conforme o banco
   balance_date         TEXT,
   reconcile_start_date TEXT,
@@ -49,7 +59,15 @@ CREATE TABLE accounts (
 );
 
 CREATE INDEX ix_accounts_order ON accounts(off_budget, sort_order) WHERE tombstone = 0;
+CREATE UNIQUE INDEX ux_accounts_external
+  ON accounts(external_account_id) WHERE external_account_id IS NOT NULL AND tombstone = 0;
 ```
+
+Notas de modelação:
+
+- **Um cartão de crédito é uma conta** (`type = 'credit'`). As compras são negativas e o saldo é uma passividade. Sem isto não há forma correta de representar dívida de cartão, e o pagamento da fatura na conta corrente seria contado como despesa além das compras já importadas — dupla contagem (ADR-014).
+- `external_account_id` é o **roteamento exato** de ficheiros: OFX traz `ACCTID` e CAMT.053 traz `IBAN`. Um ficheiro com este identificador não precisa de heurística nenhuma para encontrar a conta ([07 §3](07-muitas-contas-e-cartoes.md#3-roteamento-automático-por-conteúdo)).
+- `closing_day`/`due_day` alimentam o painel de cobertura e o emparelhamento de faturas (saber qual fatura está em falta).
 
 ### 2.2 Categorias
 
@@ -265,13 +283,31 @@ CREATE TABLE schedules (
 ### 2.8 Importação
 
 ```sql
--- Perfil aprendido por conta e por banco: mapeamento de colunas + opções de parsing
+-- Perfil de importação multi-formato. Duas origens: a biblioteca embutida no
+-- binário (profiles/*.yaml, ADR-015) e os overrides/aprendizagens do utilizador,
+-- que vivem aqui. O utilizador nunca parte do zero se a instituição for coberta.
 CREATE TABLE import_profiles (
   id                 TEXT PRIMARY KEY,
   account_id         TEXT REFERENCES accounts(id),
-  bank_slug          TEXT,                         -- 'nubank','itau','bb','bradesco','c6',...
+  institution_slug   TEXT,                         -- 'nubank','itau','bb','bradesco','c6',...
   label              TEXT NOT NULL,
-  header_signature   TEXT NOT NULL,                -- hash dos nomes de coluna normalizados
+
+  source_format      TEXT NOT NULL CHECK (source_format IN ('csv','ofx','camt053')),
+  -- Assinatura de deteção, com semântica por formato:
+  --   ofx/camt053 -> ACCTID / IBAN (roteamento exato, sem heurística)
+  --   csv         -> hash dos nomes de coluna normalizados
+  signature          TEXT NOT NULL,
+  detection_json     TEXT,                         -- tokens de cabeçalho, confiança mínima
+
+  section_rules_json TEXT,                         -- [{ match:'final (?P<last4>\\d{4})', action:'set_target_account' }]
+  card_rules_json    TEXT,                         -- deteção de pagamento de fatura e emparelhamento (ADR-014)
+  -- Números que a fonte declara e que servem de invariantes de verificação.
+  -- Em CSV vêm de linhas-resumo (regex); em OFX, de <LEDGERBAL>/<AVAILBAL>.
+  declared_totals_json TEXT,                       -- { open:'...', close:'...', purchases:'...', count:... }
+
+  origin             TEXT NOT NULL DEFAULT 'user'
+                     CHECK (origin IN ('library','user','learned')),
+  library_version    TEXT,                         -- versão do perfil de biblioteca substituído
   mapping_json       TEXT NOT NULL,                -- { date:'Data', amount:'Valor', payee:'Histórico', ... }
   parse_options_json TEXT NOT NULL,                -- { delimiter, dateFormat, decimalSeparator, skipLines, encoding }
   ignore_rules_json  TEXT,                         -- linhas-resumo a descartar
@@ -281,14 +317,20 @@ CREATE TABLE import_profiles (
   last_used_at       INTEGER,
   created_at         INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX ux_profiles_signature ON import_profiles(account_id, header_signature);
+CREATE UNIQUE INDEX ux_profiles_signature
+  ON import_profiles(source_format, signature, coalesce(account_id, ''));
+CREATE INDEX ix_profiles_institution ON import_profiles(institution_slug, source_format);
 
 CREATE TABLE import_batches (
   id                    TEXT PRIMARY KEY,
-  account_id            TEXT NOT NULL REFERENCES accounts(id),
+  -- account_id é a conta PRINCIPAL do lote. Um lote pode alimentar várias contas
+  -- (fatura com titular e adicional); o destino por linha está em import_rows.
+  account_id            TEXT REFERENCES accounts(id),
   profile_id            TEXT REFERENCES import_profiles(id),
-  origin                TEXT NOT NULL CHECK (origin IN ('upload','watcher','imap','api','manual')),
+  source_format         TEXT NOT NULL CHECK (source_format IN ('csv','ofx','camt053')),
+  origin                TEXT NOT NULL CHECK (origin IN ('upload','watcher','imap','api','manual','reprocess')),
   original_filename     TEXT,
+  original_path         TEXT,                      -- relativo a /data/uploads: permite reprocessar
   file_sha256           TEXT NOT NULL,
   file_bytes            INTEGER,
   status                TEXT NOT NULL CHECK (status IN
@@ -300,6 +342,9 @@ CREATE TABLE import_batches (
   rows_error            INTEGER NOT NULL DEFAULT 0,
   period_start          TEXT,
   period_end            TEXT,
+  -- Reconciliação: valores declarados pela fonte vs. calculados a partir das linhas
+  declared_totals_json  TEXT,                      -- { open, close, purchases, payments, count, ... }
+  reconciliation_json   TEXT,                      -- [{ kind:'balance'|'total'|'count', declared, computed, delta, ok }]
   declared_open_cents   INTEGER,
   declared_close_cents  INTEGER,
   computed_open_cents   INTEGER,
@@ -311,8 +356,9 @@ CREATE TABLE import_batches (
   undone_at             INTEGER
 );
 CREATE INDEX ix_batches_account ON import_batches(account_id, created_at DESC);
+CREATE INDEX ix_batches_period  ON import_batches(account_id, period_end DESC);  -- painel de cobertura
 CREATE UNIQUE INDEX ux_batches_file_committed
-  ON import_batches(account_id, file_sha256) WHERE status = 'committed';
+  ON import_batches(coalesce(account_id, ''), file_sha256) WHERE status = 'committed';
 
 CREATE TABLE import_rows (
   id                    TEXT PRIMARY KEY,
@@ -323,19 +369,27 @@ CREATE TABLE import_rows (
   row_hash              TEXT NOT NULL,             -- hash do conteúdo normalizado
   occurrence_index      INTEGER NOT NULL DEFAULT 0,-- desambigua lançamentos idênticos no mesmo dia
   derived_imported_id   TEXT,
+  -- Conta de destino desta linha: permite dividir uma fatura por cartão num só lote (ADR-014)
+  target_account_id     TEXT REFERENCES accounts(id),
+  section_label         TEXT,                      -- 'Cartao final 1234', para agrupar na pré-visualização
   status                TEXT NOT NULL CHECK (status IN
                           ('new','duplicate','updated','ignored','error','committed')),
   matched_tx_id         TEXT,                      -- transação existente que será fundida
-  planned_action        TEXT,                      -- 'insert' | 'update' | 'skip'
+  planned_action        TEXT,                      -- 'insert' | 'update' | 'skip' | 'transfer_pair'
   planned_changes_json  TEXT,
   diagnostics_json      TEXT,                      -- [{level, code, field, value}]
   committed_tx_id       TEXT,
   UNIQUE (batch_id, row_hash, occurrence_index)
 );
 CREATE INDEX ix_import_rows_batch ON import_rows(batch_id, status);
+CREATE INDEX ix_import_rows_target ON import_rows(batch_id, target_account_id);
 ```
 
 Guardar **todas** as linhas em `staging`, incluindo as descartadas, é o que permite: pré-visualizar sem escrever, aprovar linha a linha, explicar porque algo foi ignorado e reverter o lote inteiro depois.
+
+**Reprocessamento.** Como `original_path` fica registado, um lote existe independentemente do ficheiro: corrigir o mapeamento de um perfil e chamar `POST /imports/{id}/reprocess` produz um novo lote a partir do mesmo original, sem novo *upload*. É o que permite corrigir um mês inteiro retroativamente quando o perfil estava errado.
+
+**Emparelhamento de fatura (ADR-014).** O `imported_id` do lançamento de pagamento é o `batch_id` da fatura emparelhada. Isto torna o emparelhamento determinístico e idempotente: reprocessar não cria uma segunda transferência.
 
 ### 2.9 Auditoria e jobs
 
@@ -454,7 +508,12 @@ Ordem de tentativa, da maior para a menor fidelidade:
 | T1 | Ficheiro já importado (`file_sha256`) | Marcar tudo como `duplicate`, não escrever |
 | T2 | Mesma conta, `|Δdata| ≤ 7d`, mesmo `amount_cents`, similaridade de payee ≥ 0.85 | Fundir com a transação existente (preferir os dados do banco para data/valor) |
 | T3 | Candidatos restantes: emparelhamento guloso 1-para-1 pelo mais próximo em data | Evita que uma transação «absorva» várias linhas |
-| T4 | Conta diferente, valor oposto, `|Δdata| ≤ 3d` | Marcar transferência (`transfer_id`) |
+| T4 | Conta diferente, valor oposto, `\|Δdata\| ≤ 3d` | Marcar transferência (`transfer_id`) |
+| T5 | **Pagamento de fatura**: débito na conta corrente cujo valor iguala o `declared_close_cents` (ou a soma do ciclo) de um lote de fatura de um cartão | Transferência automática para a conta do cartão, com `imported_id` = `batch_id` da fatura (ADR-014) |
+
+A camada T5 é a que impede o erro de contabilidade mais provável em quem tem vários cartões: a fatura traz as compras e a conta corrente traz uma linha de pagamento. Sem emparelhamento, a despesa é contada duas vezes.
+
+Onde existe um identificador exato (o total declarado da fatura), **não se usa heurística**. As camadas T2/T4 usam janelas de data porque não há melhor informação; T5 não precisa.
 
 Campos em conflito seguem a regra: dados do banco vencem em `date`, `amount_cents` e `imported_payee`; dados do utilizador vencem em `category_id`, `notes`, `payee_id`, `cleared` e `reconciled`. Esta regra é **explícita no código** e testada, porque é a origem mais comum de «perdi a minha categorização».
 
@@ -462,11 +521,12 @@ Campos em conflito seguem a regra: dados do banco vencem em `date`, `amount_cent
 
 ## 4. Migração futura para PostgreSQL
 
-Isolamento deliberado: todo o SQL vive em `apps/server/src/data/`. Se o volume crescer (multi-utilizador real, dezenas de milhões de transações) ou se for necessária replicação, a migração implica:
+Isolamento deliberado: todo o SQL vive em `internal/data/`. Se o volume crescer (multi-utilizador real, dezenas de milhões de transações) ou se for necessária replicação, a migração implica:
 
-1. Substituir o *driver* e o dialecto Drizzle.
+1. Substituir o *driver* (`modernc.org/sqlite` → `pgx`) e o dialeto SQL.
 2. Converter `REAL` de `sort_order` em `bigint` com *gaps*.
 3. Substituir `FTS5` por `tsvector`.
 4. Reescrever as consultas de agregação específicas.
+5. Reavaliar as `CHECK` e índices parciais (funcionam igual, mas com sintaxe a confirmar).
 
-Nada disto toca em `packages/domain`, `packages/rules` ou `packages/import-core`. É exatamente esse o benefício de manter a lógica de negócio fora da camada de dados.
+Nada disto toca em `internal/domain`, `internal/modules` nem em `internal/adapters`. É exatamente esse o benefício de manter a lógica de negócio fora da camada de dados — e em Go isso é verificável por lint: **`internal/domain` não pode importar `internal/data`**.
