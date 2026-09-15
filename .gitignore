@@ -1,0 +1,17 @@
+# Binários e artefactos de build
+/bin/
+*.test
+*.out
+
+# Dados de execução — nunca versionados
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# Ferramentas locais
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store

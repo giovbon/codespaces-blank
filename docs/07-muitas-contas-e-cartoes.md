@@ -35,7 +35,9 @@ São dois problemas distintos. O primeiro é *parsing*. O segundo é **logístic
 | 3 | **CSV do portal** | Alta — o núcleo do projeto | Já é o foco |
 | 4 | **Anexo de email (IMAP)** | Alta — muitas vezes é OFX, e o utilizador nem sabe | Adapter IMAP já previsto |
 | 5 | ~~PDF~~ | — | **Fora de âmbito (ADR-016)** |
-| 6 | Agregador (Pluggy, Belvo) | Alta, com custo mensal | Adapter futuro, mesma interface |
+| 6 | ~~Agregador (Pluggy, Belvo)~~ | — | **Descartado por custo (ADR-021).** API paga com preço de mercado, incompatível com uso pessoal. Verificado em uso real: o próprio autor tentou usar o Actual com o Pluggy e abandonou pelo custo |
+
+**Consequência prática do degrau 6 descartado:** a única via de entrega automática que resta é o **degrau 4 (IMAP)** — que é gratuita e cobre a parte dos bancos que envia extrato por email. Para os restantes, o download manual continua a existir, e é por isso que o desenho do `/data/inbox` (§3) importa tanto: reduz nove downloads a nove descargas para a mesma pasta.
 
 ### 2.1 Checklist de esgotamento do *upstream*
 
@@ -291,16 +293,19 @@ Três tipos de *fixture*, todos com perfil obrigatório a acompanhar:
 
 ## 11. Fases
 
-| Fase | Entrega | Critério de saída |
+A ordem canónica do roadmap está em [01](01-arquitetura.md#9-roadmap-por-fases) §9 e é ordenada por minutos devolvidos ao utilizador (ADR-018). Aqui fica só o que este documento entrega, por fase:
+
+| Fase | Entrega desta área | Critério de saída |
 | --- | --- | --- |
-| **M2** | CSV genérico + **roteamento por conteúdo** + **painel de cobertura** + contas de cartão (`type='credit'`) | Entrego 5 ficheiros numa pasta e não escolho nada; vejo o que falta |
-| **M3** | **Biblioteca de perfis** + reconciliação de saldo + `payee_rules` brasileiras + **fatura matcher** + IMAP | Importação mensal = uma confirmação; cartão deixa de duplicar despesa |
-| **M3.5** | **OFX + CAMT.053** (`FITID`, roteamento por `ACCTID`/`IBAN`) | Contas com OFX deixam de ter qualquer trabalho |
-| **M4** | Divisão por cartão (titular/adicional) e tratamento de parcelas | Fatura com adicional importa para duas contas num só lote |
-| **M4.5** | Relatórios, recorrências, projeção | Visão consolidada anual sem consultas manuais |
-| Futuro | Agregador Open Banking (Pluggy/Belvo) pela mesma interface | — |
+| **M2** | **Roteamento por conteúdo** + contas de cartão (`type='credit'`) + **fatura matcher** + reconciliação declarada + **painel de cobertura** + contas-alvo distintas por linha | Largo 9 ficheiros numa pasta sem escolher nada, o cartão deixa de duplicar despesa, e vejo o que falta importar |
+| **M3** | **Biblioteca de perfis** + regras de *payee* brasileiras + aprendizagem de categoria | A instituição coberta deixa de exigir configuração, e a categorização converge para zero |
+| **M3.5** | **OFX e CAMT.053** (`FITID`, roteamento por `ACCTID`/`IBAN`) | Contas com OFX deixam de ter qualquer trabalho manual |
+| **M4** | Parcelas e blocos de resumo das compras parceladas | O bloco de parceladas deixa de impedir a reconciliação de fechar |
+| **M4.5** | **IMAP** (entrega automática) + `auto_commit` por perfil | Nas contas cobertas, o mês passa sem *download* manual |
 
 **Nota de âmbito:** não há fase para PDF. O estudo está preservado em [99](99-fora-de-ambito-pdf.md) e reabri-lo exige uma decisão nova.
+
+**Nota de âmbito:** não há fase para agregadores de extratos (Pluggy, Belvo). Descartados por custo — [ADR-021](05-decisoes-adr.md#adr-021--agregadores-de-extratos-descartados-por-custo). A entrega automática é o IMAP, e não se reserva nada no esquema para uma futura integração.
 
 ---
 

@@ -2,7 +2,7 @@
 
 Formato: **Contexto → Decisão → Alternativas avaliadas → Consequências**.
 
-**Registo de revisões.** ADR-001, ADR-003, ADR-004, ADR-005, ADR-006, ADR-008, ADR-010 e ADR-013 foram revistos em **2026-09-14**, no âmbito da passagem a Go com UI renderizada no servidor (ADR-012), da ingestão multi-fonte (ADR-013 a ADR-015) e da **exclusão de PDF do âmbito (ADR-016)**. Cada revisão está assinalada no próprio ADR. Os ADR-002, ADR-007, ADR-009, ADR-011, ADR-014, ADR-015, ADR-016 e ADR-017 permanecem válidos.
+**Registo de revisões.** ADR-001, ADR-003, ADR-004, ADR-005, ADR-006, ADR-008, ADR-010 e ADR-013 foram revistos em **2026-09-14**, no âmbito da passagem a Go com UI renderizada no servidor (ADR-012), da ingestão multi-fonte (ADR-013 a ADR-015) e da **exclusão de PDF do âmbito (ADR-016)**. Cada revisão está assinalada no próprio ADR. Em **2026-09-15**, o **ADR-008 foi estendido pelo ADR-018** (pré-visualização **por exceção** e tempo de importação como objetivo primário), com reflexo no [04](04-motor-importacao-csv.md) §8; o **ADR-013 fica condicionado pelo ADR-021** (a interface de *adapter* não pode reservar espaço para agregadores de extratos). Os ADR-002, ADR-007, ADR-009, ADR-011, ADR-014, ADR-015, ADR-016 e ADR-017 permanecem válidos.
 
 > **Nota de manutenção (ADR-017).** Este registo de revisões, o índice acima e o `README.md` têm de ser atualizados **no mesmo *pull request*** que cria ou revê um ADR. Instruções de agente que contradigam um ADR vigente são um modo de falha conhecido neste projeto.
 
@@ -15,7 +15,7 @@ Formato: **Contexto → Decisão → Alternativas avaliadas → Consequências**
 | 005 | Dinheiro em inteiros e datas civis | Revisto (detalhe de linguagem) |
 | 006 | Regras como dados (DSL JSON) e aprendizagem, em vez de ML | Revisto (escada de evolução) |
 | 007 | *Journal* de auditoria com *soft delete* | Válido |
-| 008 | Importação com *staging* persistido e pré-visualização obrigatória | Estendido (multi-formato) |
+| 008 | Importação com *staging* persistido e pré-visualização obrigatória | Estendido (multi-formato; pré-visualização **por exceção** — ADR-018) |
 | 009 | Sem motor de planilha genérico | Válido |
 | 010 | Deploy em Docker multi-arch com Litestream; sem Kubernetes | Revisto (binário Go *distroless*) |
 | 011 | Não fazer *fork* do Actual Budget | Válido |
@@ -25,6 +25,10 @@ Formato: **Contexto → Decisão → Alternativas avaliadas → Consequências**
 | 015 | Biblioteca de perfis embutida no repositório | Novo |
 | 016 | PDF fora de âmbito | Novo |
 | 017 | Otimização de contexto para agentes de IA | Novo |
+| 018 | O objetivo primário é o tempo de importação | Novo |
+| 019 | Autenticação por senha única, para até 2 pessoas | Novo |
+| 020 | Interface: tema Nord, minimalista, sem kit de componentes | Novo |
+| 021 | Agregadores de extratos descartados por custo | Novo |
 
 ---
 
@@ -253,7 +257,11 @@ O degrau 3 é a forma **correta** de usar um modelo: o modelo é **ferramenta de
 **Contexto.** Um único erro de mapeamento pode inserir centenas de transações erradas. Detetá-lo depois é caro; evitá-lo antes é barato.
 
 **Decisão.** O pipeline grava todo o resultado intermédio em `import_rows` dentro do mesmo `import_batch`. Nada é escrito em `transactions` antes de um *commit* explícito, exceto quando o perfil tem `auto_commit` e todos os diagnósticos são `ok`.
+
 > **Estendido em 2026-09-14** (ADR-013/ADR-014). O *staging* é **agnóstico ao formato**: CSV, OFX e CAMT.053 alimentam as mesmas tabelas. Duas extensões: (a) a condição de `auto_commit` passa a exigir também a **reconciliação contra os totais declarados** da fonte, e não apenas ausência de erros; (b) um lote pode ter **contas-alvo distintas por linha** (`import_rows.target_account_id`), mantendo um único *commit* e um único *undo*.
+>
+> **Estendido em 2026-09-15** (ADR-018). A pré-visualização obrigatória passa a ser **por exceção**: uma linha só exige decisão humana se tiver diagnóstico `warn`/`error`, emparelhamento de cartão não resolvido ou confiança de categoria abaixo do limiar. Ver [04](04-motor-importacao-csv.md) §8.
+
 **Alternativas avaliadas.**
 
 | Alternativa | Porque não |
@@ -573,3 +581,184 @@ Detalhe operacional, inventário dos ficheiros e antipadrões em [08-otimizacao-
 - (−) Risco de *over-fitting*: regras demasiado específicas envelhecem como as decisões que descrevem.
 - (−) *Hooks* introduzem código de *shell* no repositório, que precisa de ser revisto como qualquer código.
 - *Métrica de saúde*: se uma instrução não evitou pelo menos uma ida-e-volta por semana, deve ser removida.
+
+---
+
+## ADR-018 — O objetivo primário é o tempo de importação
+
+**Contexto.** O problema que motivou o projeto é declarado no `README.md`: *não gastar uma tarde por mês a alimentar o sistema*. Todos os ADR anteriores decidem **como** construir; nenhum fixa **o que medir**, nem o critério para recusar funcionalidade.
+
+Sem isso, o modo de falha já identificado (ADR-012: «o projeto crescer até à complexidade do Actual e não terminar») não tem travão. A referência de origem tem ~120 ecrãs; cada um é defensável isoladamente e nenhum reduz o tempo mensal.
+
+Três medições anteriores mostram que o gargalo não está onde parecia:
+
+- O *parsing* de 3 000 linhas corre em menos de 2 s. **Não é o gargalo** (medição registada no ADR-012).
+- A RAM e o arranque separam Go de Node, mas em qualquer host com 4 GB ambas as opções são irrelevantes. **Não é o gargalo.**
+- O ADR-016 já removeu a peça mais cara do plano (PDF) invocando exatamente este critério — mas de forma implícita, para um caso só.
+
+O que sobra é o **trabalho humano por mês**. Decomposto em três parcelas:
+
+```
+tempo do mês = tempo de obter os ficheiros  (sites do banco)
+             + número de decisões humanas × tempo por decisão   → o que o sistema controla
+             + tempo de verificar («importei tudo?»)
+```
+
+O sistema controla as duas últimas. A primeira só sai com entrega automática por IMAP ou agregador.
+
+**Decisão.**
+
+1. **A métrica primária do projeto é o tempo humano de ingestão por mês.** Não é cobertura funcional, não é desempenho, não é consumo de memória. Orçamento para o cenário de referência (9 contas e 3 cartões): **≤ 45 min/mês** sem entrega automática e **≤ 15 min/mês** com ela.
+
+2. **A regra de desenho que decorre daí: o número de decisões humanas por lote tende para zero e não é proporcional ao número de linhas.** Toda a funcionalidade que devolva uma decisão ao utilizador tem de justificar por que não pode ser resolvida pela máquina.
+
+3. **Pré-visualização por exceção** (estende o ADR-008). Uma linha só sobe à UI como decisão pendente se tiver: diagnóstico `warn`/`error`, emparelhamento de cartão por resolver, ou confiança de categoria abaixo do limiar. As restantes ficam pré-selecionadas.
+
+4. **Cliques constantes.** Aprovar um lote é **uma** ação, independentemente de ter 40 ou 40 000 linhas. O que varia é o número de exceções mostradas, não o custo de aprovar.
+
+5. **O que a fonte declara não é confirmado por humano.** Saldo, total de fatura e contagens são invariantes verificados pela máquina (ADR-008, ADR-013). À UI sobe apenas a **divergência**, com a causa explicada.
+
+6. **Ordem de construção por minutos devolvidos**, e não por dificuldade técnica: perfis de instituição → roteamento por pasta → emparelhamento de fatura de cartão → aprendizagem de categoria → painel de cobertura → **entrega automática (IMAP/agregador)** → `auto_commit` por perfil. Justificação e estimativa por item em [07](07-muitas-contas-e-cartoes.md) §1 e §7.2.
+
+7. **Métricas instrumentadas** (o que não é medido não é reivindicável):
+   - decisões humanas por lote — meta: 0 na maioria dos lotes;
+   - percentagem de lotes aprovados sem nenhuma decisão — meta: > 80% após 3 meses de uso;
+   - minutos entre a queda do ficheiro em `/data/inbox` e o *commit*.
+
+8. **Critério de admissão.** Funcionalidade que não reduza o tempo mensal de ingestão nem seja necessária para a correção dos dados é **adiada por omissão**. A matriz de escopo que aplica este critério ao repo de origem é o [09](09-escopo-vs-actual.md).
+
+**Alternativas avaliadas.**
+
+| Alternativa | Porque não |
+| --- | --- |
+| Métrica primária = paridade funcional com o Actual | É precisamente o modo de falha do ADR-012. ~120 ecrãs, nenhum deles reduz o tempo mensal, e a paridade é um alvo que se afasta quando o projeto de origem evolui |
+| Métrica primária = desempenho (tempo de *parsing*, RAM, arranque) | Medido e descartado: 3 000 linhas em < 2 s, e RAM irrelevante acima de 1 GB. Otimizar aqui não muda nada no tempo do utilizador |
+| Pré-visualização «mostrar tudo e deixar revisar» (como o ecrã de importação do Actual) | Torna o número de decisões humanas proporcional ao número de linhas — o gargalo de volta. O utilizador revê 3 000 linhas para encontrar 4 problemas |
+| `auto_commit` sempre, sem pré-visualização | Contradiz o ADR-008 e retira a auditabilidade do ADR-007. Uma classificação errada em silêncio custa mais tempo a descobrir do que a revisão que se evitou |
+| Não instrumentar; avaliar «por sensação» | Já foi feito nesta fase: a justificação da SPA assentava numa sensação não medida, e caiu quando foi medida (ADR-012) |
+| Reduzir ainda mais o âmbito de formatos (só CSV) | OFX e CAMT.053 trazem `FITID` e `ACCTID`, que **eliminam** decisões de dedupe e de roteamento. O custo é um *adapter* pequeno; o retorno é tempo |
+| Atacar primeiro a entrega automática (IMAP/agregador) | É o maior ganho isolado (elimina o tempo de obter os ficheiros), mas assenta em roteamento e perfis: sem eles, entrega automática significa apenas ficheiros a chegar mais depressa a um sistema que ainda pergunta a conta |
+
+**Consequências.**
+
+- (+) Existe um critério objetivo para aceitar ou recusar funcionalidade, o que resolve a discussão de âmbito antes de ela custar código.
+- (+) O tempo de aprovação passa a ser ~constante em relação ao tamanho do lote, que é o que torna o uso mensal sustentável.
+- (+) A prioridade de construção deixa de ser discutível: é ordenada por minutos devolvidos.
+- (+) A entrega automática (IMAP/agregador) sobe de «futuro» para **item de roadmap com justificação**, e a interface do ADR-013 tem de acomodar uma fonte que não é um ficheiro.
+- (−) **Exige instrumentação real** (três métricas), que é trabalho que não entrega funcionalidade visível.
+- (−) O risco muda de lugar: em vez de trabalho manual, passa a existir risco de **erro automático silencioso**. A mitigação é a rede já existente — `audit_log`, `undo` de lote inteiro e `auto_commit` condicionado a diagnósticos `ok` (ADR-007, ADR-008).
+- (−) Conflito de expectativa: o utilizador pode *querer* inspecionar tudo. As vistas **Tabela** e **Diagnóstico** ([04](04-motor-importacao-csv.md) §8) continuam disponíveis, mas nunca como caminho padrão.
+- (−) Os limiares de confiança que alimentam a exceção (`hits >= 3`, `confidence >= 0.85`) **não têm referência** no projeto de origem, que não tem aprendizagem estatística ([09](09-escopo-vs-actual.md) §5.2). São palpite e têm de ser calibrados com uso real.
+- *Métrica de saúde*: se aprovar um lote com mais de 5 decisões passar a ser o caso comum, o desenho regrediu e este ADR tem de ser revisto.
+
+---
+
+## ADR-019 — Autenticação por senha única, para até 2 pessoas
+
+**Contexto.** A aplicação é de uso pessoal/familiar: **no máximo 2 pessoas, que não a usam ao mesmo tempo**. O servidor é privado (LAN ou rede privada sobreposta) e o acesso é exclusivamente por navegador.
+
+Os produtos de referência resolvem um problema que não temos: o Actual traz registo, multiusuário, permissões e sincronização de utilizadores entre dispositivos. Trazer isso significaria ecrãs de gestão de utilizadores, convites, recuperação de senha e auditoria por identidade — tudo para distinguir duas pessoas que se conhecem e usam a mesma base de dados.
+
+**Decisão.** **Uma única senha**, definida no arranque da aplicação, guardada como *hash* **argon2id** em `app_settings` (nunca em texto simples, nunca no repositório). Sessão por *cookie* `HttpOnly` + `Secure` + `SameSite=Lax`, com token opaco em `sessions`. Sem registo, sem convites, sem recuperação por email, sem permissões, sem papéis.
+
+Opcional e barato: um campo **«quem está a usar»** com dois nomes, escolhido ao entrar, gravado no `audit_log`. Dá atribuição sem introduzir contas separadas.
+
+O primeiro arranque expõe um ecrã de definição de senha; depois disso, o ecrã desaparece. A senha muda-se por linha de comando no host (sem fluxo de recuperação na UI). *Rate limiting* no *login* e comparação em tempo constante.
+
+**Alternativas avaliadas.**
+
+| Alternativa | Porque não |
+| --- | --- |
+| Multiusuário com contas distintas (modelo do Actual) | Exige ecrãs de gestão de utilizadores, convites e recuperação de senha para separar duas pessoas que partilham as mesmas contas bancárias. Custo de construção e de contexto desproporcionado |
+| Sem autenticação nenhuma, confiando na rede privada | O risco fica todo no proxy: uma má configuração de exposição expõe dados financeiros completos. O custo de uma senha é uma tarde de trabalho |
+| *Basic Auth* no proxy (ex.: Caddy) | Não permite sessão, *logout*, revogação, *rate limit* nem o ecrã de definição da senha. Além disso, o *login* passa a depender do *proxy* em vez do binário |
+| Senha + TOTP (2FA) | Mais uma dependência, mais um segredo a guardar e recuperar, para uma superfície que já é privada. Candidato a degrau posterior, não a MVP |
+| *Login* por link mágico enviado por email | Exige servidor de email, torna o acesso dependente de rede externa e não é mais simples de usar num serviço pessoal |
+| Autenticação delegada (OIDC, *proxy* com identidade) | Exige um provedor de identidade a manter — infraestrutura nova para resolver um problema de duas pessoas |
+
+**Consequências.**
+
+- (+) Um ecrã, uma tabela e poucas linhas de código. As tabelas `users`/`sessions` existentes ([03](03-modelo-de-dados.md)) reduzem-se a uma linha fixa em `users` e às sessões ativas.
+- (+) Nada de gestão de utilizadores para manter, e nada de conteúdo sensível em email.
+- (+) Revogar acesso é apagar linhas de `sessions`. Trocar a senha invalida todas.
+- (−) **Identidade partilhada**: por omissão o `audit_log` não distingue quem fez o quê. Mitigado pelo campo opcional «quem está a usar», que é declaração e não autenticação.
+- (−) **Sem recuperação de senha na UI**: quem a perde precisa de acesso ao host. Aceitável — quem perde a senha é o operador do host.
+- (−) Uma senha única num dispositivo comprometido dá acesso total. Aceitável no modelo de ameaça deste projeto, e o *rate limit* cobre o caso remoto.
+
+---
+
+## ADR-020 — Interface: tema Nord, minimalista, sem kit de componentes
+
+**Contexto.** A UI é renderizada no servidor (`templ`) com HTMX e Alpine.js, e o CSS é construído pelo binário *standalone* do Tailwind (ADR-012) — sem `package.json` e sem *bundler*. Falta decidir a aparência: paleta, densidade e se entra um kit de componentes.
+
+O produto é feito de **tabelas densas, formulários e alguns gráficos**. Não é um *site* de marketing: a legibilidade de números e a facilidade de varrer listas grandes valem mais do que ornamento. E há uma preferência declarada do autor pelo **tema Nord** com **design minimalista**.
+
+**Decisão.** Paleta **Nord** como *tokens* CSS (`nord0`–`nord15`), definidos uma única vez em `web/static/tokens.css` e expostos ao Tailwind por `@theme`. **Nada de kit de componentes**: cada componente (tabela, botão, campo, *badge* de estado, *dialog*) é nosso e vive em `internal/views/components`.
+
+Convenções de estilo:
+
+| Aspeto | Decisão |
+| --- | --- |
+| Fundo | **Polar Night** (`nord0`–`nord3`), tema escuro como padrão |
+| Texto | `nord4`/`nord6` para texto, `nord4` mínimo para *placeholder* |
+| Semântica | `nord14` verde = entrada/categorizado, `nord11` vermelho = saída/erro, `nord13` amarelo = aviso, `nord9` azul = informação/ligado, `nord15` roxo = automático/aprendido |
+| Números | `font-variant-numeric: tabular-nums` obrigatório; monoespaçada apenas em valores e datas |
+| Densidade | Alta em tabelas; linhas de 28–32 px, para caber 40–50 linhas num ecrã |
+| Superfícies | Sem sombras, sem gradientes, raio de canto único (4 px), bordas de 1 px em `nord3` |
+| Movimento | Só transições de estado com função (ex.: indicador de HTMX); sem animações decorativas |
+| Ícones | SVG inline, traço de 1,5 px, corrente de `nord4`. Sem biblioteca de ícones |
+
+**Alternativas avaliadas.**
+
+| Alternativa | Porque não |
+| --- | --- |
+| Kit pronto (DaisyUI, shadcn, Bootstrap, Material) | Cada um traz o seu próprio sistema de design, que compete com o Nord e obriga a lutar contra a paleta. `shadcn` é React e não aplicável; os outros acrescentam peso e dependência de *build* |
+| Tailwind com as cores padrão | Paleta azulada com demasiado ruído semântico, e não resolve a decisão — apenas a adia. Os *tokens* do Nord dão significado fixo a cada cor |
+| Tema claro como padrão | O Nord foi desenhado para fundo escuro (Polar Night); invertê-lo produz contraste pobre. O autor prefere o escuro |
+| Paleta própria desde o zero | Mais tempo a decidir cores e sem referência conhecida. O Nord já é uma paleta validada, com documentação |
+| Utilitários *inline* sem *tokens* | Cor espalhada por dezenas de `templ`; mudar o significado de um estado exigiria varrer o repositório |
+
+**Consequências.**
+
+- (+) Uma paleta única e com significado estável: o estado de um lançamento lê-se pela cor sem consultar texto.
+- (+) Sem kit de componentes, o HTML gerado é previsível e inspecionável — o que facilita depurar *fragments* HTMX e escrever testes de vista.
+- (+) Zero dependência de *build* além do binário Tailwind; coerente com «Go puro» (ADR-012).
+- (−) **O contraste do Nord é baixo por desenho**: `nord3` sobre `nord0` fica abaixo de 4,5:1. É preciso escolher pares acessíveis e verificar, em vez de usar as cores literalmente por ordem.
+- (−) Sem kit, cada componente é construído por nós. Mitigado: a lista de componentes necessários é curta e estável (tabela, formulário, *badge*, *dialog*, navegação).
+- (−) Gráficos exigem paleta categórica própria derivada do Nord; `nord7`–`nord10` (Frost/Aurora) são a base.
+- (−) Risco de inconsistência com o tempo. Mitigado: os *tokens* vivem num único ficheiro e o resto da base não escreve cores literais.
+
+---
+
+## ADR-021 — Agregadores de extratos descartados por custo
+
+**Contexto.** Boa parte do trabalho mensal está no termo que o sistema não controla: **obter os ficheiros** — entrar em cada site de banco e descarregar extratos ([ADR-018](#adr-018--o-objetivo-primário-é-o-tempo-de-importação)).
+
+Os **agregadores** (Pluggy, Belvo, SimpleFIN e afins) resolvem exatamente este termo: uma API devolve os lançamentos de várias instituições sem intervenção humana. O repo de origem já integra cinco deles, incluindo **Pluggy.ai**, que é brasileiro.
+
+**Evidência de uso real.** A tentativa de usar o Actual com o Pluggy foi **abandonada pelo custo**: a API é paga e o preço de mercado é incompatível com uso pessoal. Este não é um custo de *self-hosting* — é uma **subscrição recorrente**, e contradiz o pressuposto de operação a custo marginal próximo de zero que sustenta toda a arquitetura (`docs/06`, ADR-010).
+
+**Decisão.** **Nenhuma integração com agregadores.** Nem no MVP, nem como «futuro com espaço reservado»: **não se reserva nenhum campo, tabela ou parâmetro** para uma fonte deste tipo.
+
+A entrega automática, quando existir, é o **adapter IMAP** ([07](07-muitas-contas-e-cartoes.md) §2, degrau 4) — gratuito, e muitos bancos já enviam o extrato por email. Para as instituições que não enviam, o download manual para `/data/inbox` mantém-se, e é o roteamento por conteúdo (§3 do mesmo documento) que faz esse caminho custar minutos e não tarde.
+
+**Alternativas avaliadas.**
+
+| Alternativa | Porque não |
+| --- | --- |
+| Pluggy / Belvo | Pagos com preço de mercado e orientados a empresas. **Verificado em uso real: abandonado pelo custo** |
+| SimpleFIN Bridge | Barato, mas focado em instituições norte-americanas; não cobre o caso de uso brasileiro que motivou a análise |
+| Open Finance Brasil, ligando diretamente ao banco do titular | O titular tem direito aos seus dados, mas o acesso por API exige ser participante registado (instituição autorizada). Não é viável para uma pessoa |
+| Serviço próprio de *scraping* de portais bancários | Quebra a cada mudança de *layout*, guarda credenciais bancárias e é o oposto de «sem IA/automação frágil em *runtime*». Risco desproporcionado |
+| Extrair de PDF quando não há exportação | Fora de âmbito (ADR-016) |
+| Reservar já o esquema para uma futura integração | Antipadrão registado em [09](09-escopo-vs-actual.md) §7: um campo não usado é custo de migração, de teste e de contexto, sem retorno |
+
+**Consequências.**
+
+- (+) **Custo recorrente zero**, coerente com o resto da arquitetura: um host próprio e nada mais.
+- (+) Menos uma dependência de rede e um terceiro com acesso a dados financeiros.
+- (+) Menos um eixo de falha silenciosa: agregadores mudam de contrato e de cobertura sem avisar.
+- (−) O alvo de ≤ 15 min/mês do ADR-018 passa a depender **inteiramente da cobertura de IMAP** por instituição, e não de uma integração com cobertura garantida. Para bancos que não enviam email, o tempo fica no patamar dos ≤ 45 min/mês.
+- (−) Se um dia o custo ou a cobertura mudarem, isto exige um **ADR novo** — não uma adaptação silenciosa de um *adapter* existente.
+- *Reversibilidade*: a decisão é reversível sem custo de esquema, porque nada foi reservado. É o principal argumento a favor de não reservar.
+

@@ -1,0 +1,53 @@
+package layout
+
+// Base é o documento HTML comum a todas as páginas.
+//
+// O conteúdo entra como children. As bibliotecas de JavaScript são servidas
+// pelo próprio binário, e não por CDN: a aplicação é self-hosted e não depende
+// de rede externa para funcionar (ADR-010).
+templ Base(titulo string) {
+	<!DOCTYPE html>
+	<html lang="pt-BR" class="h-full">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ titulo } · Finanças</title>
+			<link rel="stylesheet" href="/static/app.css"/>
+			<!-- O HTMX avalia expressões em atributos por padrão, o que exige
+			     'unsafe-eval' na política de conteúdo. Desligar é o que permite
+			     manter a política estrita (docs/06). -->
+			<meta name="htmx-config" content='{"allowEval":false,"includeIndicatorStyles":false}'/>
+			<script src="/static/htmx.min.js" defer></script>
+			<script src="/static/alpine.min.js" defer></script>
+		</head>
+		<body class="min-h-full bg-nord0 text-nord4 antialiased">
+			{ children... }
+		</body>
+	</html>
+}
+
+// Pagina é o enquadramento das páginas autenticadas: cabeçalho e conteúdo.
+templ Pagina(titulo string, ator string) {
+	@Base(titulo) {
+		<header class="border-b border-nord3 bg-nord1">
+			<div class="mx-auto flex max-w-5xl items-center justify-between px-6 py-3">
+				<a href="/" class="text-sm font-semibold tracking-wide text-nord6">Finanças</a>
+				<div class="flex items-center gap-4 text-sm">
+					if ator != "" {
+						<span class="text-nord4">
+							{ ator }
+						</span>
+					}
+					<form method="post" action="/sair">
+						<button type="submit" class="cursor-pointer rounded-nord border border-nord3 px-3 py-1 text-nord4 hover:border-nord8 hover:text-nord8">
+							Sair
+						</button>
+					</form>
+				</div>
+			</div>
+		</header>
+		<main class="mx-auto max-w-5xl px-6 py-8">
+			{ children... }
+		</main>
+	}
+}

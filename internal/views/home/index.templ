@@ -1,0 +1,52 @@
+package home
+
+import (
+	"financas/internal/modules/system"
+	"financas/internal/views/layout"
+)
+
+// Page é o ecrã inicial.
+//
+// Na fase M0 ainda não há importação: o que existe é a fundação. Esta página
+// mostra o estado real da base de dados, para que a instalação seja verificável
+// no navegador em vez de exigir um cliente SQL (docs/10 §5, M0).
+templ Page(estado system.Status, ator string) {
+	@layout.Pagina("Início", ator) {
+		<h1 class="text-xl font-semibold text-nord6">Fundação instalada</h1>
+		<p class="mt-2 max-w-2xl text-sm text-nord4">
+			A base de dados está criada e o esquema aplicado. A importação de CSV é a próxima fatia, e é a que define o produto: o objetivo é importar o extrato de um banco <span class="text-nord6">sem tomar nenhuma decisão</span>.
+		</p>
+
+		<section class="mt-8 rounded-nord border border-nord3 bg-nord1 p-5">
+			<h2 class="text-sm font-semibold tracking-wide text-nord6 uppercase">Estado do sistema</h2>
+
+			<dl class="mt-4 grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
+				<div>
+					<dt class="text-xs text-nord4 uppercase">Arquivo da base</dt>
+					<dd class="tabular mt-1 text-sm break-all text-nord6">{ estado.DBPath }</dd>
+				</div>
+				<div>
+					<dt class="text-xs text-nord4 uppercase">Migrações aplicadas</dt>
+					<dd class="tabular mt-1 text-sm text-nord6">{ texto(len(estado.Migrations)) }</dd>
+				</div>
+				<div>
+					<dt class="text-xs text-nord4 uppercase">Tabelas</dt>
+					<dd class="tabular mt-1 text-sm text-nord6">{ texto(len(estado.Tables)) }</dd>
+				</div>
+			</dl>
+
+			<div class="mt-5 flex flex-wrap gap-2">
+				for _, nome := range estado.Migrations {
+					<span class="rounded-nord border border-nord3 px-2 py-1 text-xs text-nord4">{ nome }</span>
+				}
+			</div>
+		</section>
+
+		<section class="mt-6 rounded-nord border border-nord3 bg-nord1 p-5">
+			<h2 class="text-sm font-semibold tracking-wide text-nord6 uppercase">Próximo passo</h2>
+			<p class="mt-2 max-w-2xl text-sm text-nord4">
+				Importar um CSV real de ponta a ponta: perfil do banco, normalização, pré-visualização por exceção e <em>undo</em> de lote. Enquanto isso não existir, esta aplicação ainda não faz aquilo para que foi feita.
+			</p>
+		</section>
+	}
+}

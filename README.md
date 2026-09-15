@@ -22,10 +22,12 @@ O problema que motiva o projeto é concreto e pessoal: **ter muitas contas banc�
 | [docs/02-stack.md](docs/02-stack.md) | Go e bibliotecas escolhidas, com justificativa e alternativas rejeitadas |
 | [docs/03-modelo-de-dados.md](docs/03-modelo-de-dados.md) | Esquema SQL completo, invariantes, índices, estratégia de deduplicação |
 | [docs/04-motor-importacao-csv.md](docs/04-motor-importacao-csv.md) | Pipeline de importação em 7 estágios, deteção automática, dedupe, aprendizagem |
-| [docs/05-decisoes-adr.md](docs/05-decisoes-adr.md) | 17 ADRs com contexto, alternativas avaliadas e consequências (com registo de revisões e índice no topo) |
+| [docs/05-decisoes-adr.md](docs/05-decisoes-adr.md) | 21 ADRs com contexto, alternativas avaliadas e consequências (com registo de revisões e índice no topo) |
 | [docs/06-operacao-arm64.md](docs/06-operacao-arm64.md) | Deploy Docker multi-arch, TLS, backup, segurança, monitorização, plano de restauro |
 | [docs/07-muitas-contas-e-cartoes.md](docs/07-muitas-contas-e-cartoes.md) | Muitas contas e vários cartões: roteamento por conteúdo, biblioteca de perfis, painel de cobertura, evitação de dupla contagem |
 | [docs/08-otimizacao-de-contexto.md](docs/08-otimizacao-de-contexto.md) | Economia de contexto para agentes de IA: inventário das customizações, orçamentos, antipadrões e manutenção |
+| [docs/09-escopo-vs-actual.md](docs/09-escopo-vs-actual.md) | Portão de escopo: o que extrair do Actual e o que descartar, módulo a módulo |
+| [docs/10-construcao-e-estrutura.md](docs/10-construcao-e-estrutura.md) | Estrutura de pastas, regras que ela impõe e plano de construção em fatias verticais |
 | [docs/99-fora-de-ambito-pdf.md](docs/99-fora-de-ambito-pdf.md) | **Arquivado.** Estudo técnico de extração de PDF, preservado porque a decisão o excluiu do âmbito (ADR-016) |
 
 ## Resumo das decisões estruturantes
@@ -41,13 +43,19 @@ O problema que motiva o projeto é concreto e pessoal: **ter muitas contas banc�
 9. **Regras e perfis como dados** — motor de regras em JSON, perfis em YAML versionados no repositório. O utilizador edita, exporta e partilha; o binário não muda.
 10. **PDF fora de âmbito** — decisão explícita (ADR-016), que remove do sistema a dependência de `poppler`/OCR, o editor de colunas e um eixo de erro silencioso. O estudo técnico fica arquivado em `docs/99` para que reabrir seja barato se um dia se justificar.
 11. **Economia de contexto como requisito de projeto** (ADR-017) — o trabalho é feito em parte com assistentes de IA, e o custo dominante é o contexto redescoberto em cada pedido. Instruções de agente curtas e com orçamento, contexto condicional por `applyTo` específico (nunca `**`), agentes com ferramentas mínimas, *hooks* para o que tem de ser determinístico, e índice navegável no topo dos documentos. Inventário e regras de manutenção em [docs/08](docs/08-otimizacao-de-contexto.md).
+12. **O objetivo primário é o tempo de importação, e é medido** (ADR-018) — não é cobertura funcional nem desempenho. Orçamento: ≤ 45 min/mês para 9 contas e 3 cartões, ≤ 15 min/mês com entrega automática. Daí decorrem a pré-visualização **por exceção** (só sobe à UI o que tem diagnóstico), cliques constantes na aprovação e um critério explícito para adiar funcionalidade. O portão de escopo que aplica esse critério ao repo do Actual, módulo a módulo, é [docs/09](docs/09-escopo-vs-actual.md).
+13. **Interface minimalista em tema Nord e acesso por senha única** (ADR-019, ADR-020) — para até 2 pessoas que não usam ao mesmo tempo: uma senha, uma sessão, sem gestão de utilizadores. Paleta Nord em `tokens.css` (fundo Polar Night, alto contraste em tabelas densas, `tabular-nums` em valores) e **nenhum kit de componentes** — cada componente é nosso, em `templ`.
+14. **Construção em fatias verticais** (ADR-018) — cada fase atravessa todas as camadas e entrega algo utilizável. A importação de CSV sobe para **M1**, antes de orçamento e relatórios. Estrutura de pastas, regras de dependência e critérios de pronto em [docs/10](docs/10-construcao-e-estrutura.md).
 
 ## O que deliberadamente **não** fazemos
 
-Micro-serviços, Kubernetes, Redis, PostgreSQL, GraphQL, SPA e *framework* de frontend, `node_modules`, app Electron, motor de planilha completo, multi-moeda, *machine learning* em *runtime*, **extração de PDF e OCR**. Cada um destes é registado como não-objetivo com justificativa em [docs/01-arquitetura.md](docs/01-arquitetura.md#11-não-objetivos) e nos ADRs.
+Micro-serviços, Kubernetes, Redis, PostgreSQL, GraphQL, SPA e *framework* de frontend, `node_modules`, app Electron, motor de planilha completo, multi-moeda, *machine learning* em *runtime*, **extração de PDF e OCR**, **agregadores de extratos pagos** (ADR-021 — verificado em uso real: a API do Pluggy é cara para uso pessoal). Cada um destes é registado como não-objetivo com justificativa em [docs/01-arquitetura.md](docs/01-arquitetura.md#11-não-objetivos) e nos ADRs.
 
 Sobre IA: `transformers.js` e modelos ONNX foram avaliados e **rejeitados nesta fase** — reintroduziriam um *runtime* JavaScript e contradiriam o ADR-006. A escada de evolução admitida (degraus 1 a 4) está registada no ADR-006, com a IA a entrar apenas como ferramenta *offline* de *build*, nunca como dependência do binário.
 
 ## Nota sobre licenciamento
 
 O Actual Budget é distribuído sob licença **MIT**. Reimplementar funcionalidades é livre; reutilizar código-fonte obriga a preservar o aviso de copyright e a atribuição. A decisão registada (ADR-011) é **reimplementar com referência funcional**, não fazer *fork*. O mesmo critério foi aplicado a ferramentas como o Tabula: as ideias de UX e de algoritmo são referência, não código copiado.
+
+
+acha uma boa ideia usar isso nesse projeto? https://go-chi.io/

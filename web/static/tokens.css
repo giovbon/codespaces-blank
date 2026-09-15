@@ -1,0 +1,36 @@
+/* tokens.css — paleta Nord.
+ *
+ * Único ficheiro do repositório com cores literais (ADR-020). Qualquer cor
+ * nova entra aqui e é referida em todo o resto pelo nome do token; um valor
+ * hexadecimal fora deste ficheiro é um defeito.
+ *
+ * O contraste do Nord é baixo por desenho: nord3 sobre nord0 fica abaixo do
+ * mínimo de acessibilidade. Por isso o texto usa nord4/nord6 e as bordas usam
+ * nord3 — nunca o inverso.
+ */
+
+:root {
+  /* Polar Night — fundos */
+  --nord0: #2e3440;
+  --nord1: #3b4252;
+  --nord2: #434c5e;
+  --nord3: #4c566a;
+
+  /* Snow Storm — texto */
+  --nord4: #d8dee9;
+  --nord5: #e5e9f0;
+  --nord6: #eceff4;
+
+  /* Frost — informação e foco */
+  --nord7: #8fbcbb;
+  --nord8: #88c0d0;
+  --nord9: #81a1c1;
+  --nord10: #5e81ac;
+
+  /* Aurora — semântica de estado */
+  --nord11: #bf616a; /* saída, erro */
+  --nord12: #d08770; /* atenção moderada */
+  --nord13: #ebcb8b; /* aviso */
+  --nord14: #a3be8c; /* entrada, conforme */
+  --nord15: #b48ead; /* automático, aprendido */
+}

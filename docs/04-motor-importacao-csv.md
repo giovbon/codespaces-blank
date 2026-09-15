@@ -296,6 +296,28 @@ Cabeçalho do *diff*: total de linhas, novas, atualizadas, ignoradas, erros, int
 
 A UI oferece três vistas: **Diff** (padrão, focada em decisões), **Tabela** (todas as linhas, com filtros) e **Diagnóstico** (só problemas, agrupados por código). Criar/atualizar o perfil é uma ação da própria pré-visualização, não um ecrã separado.
 
+### 8.1 Pré-visualização por exceção (ADR-018)
+
+A vista **Diff** é **por exceção**: não lista o lote, lista o que precisa de decisão humana.
+
+Uma linha é promovida a «decisão pendente» se, e só se:
+
+- tiver `Diagnostic` de nível `warn` ou `error`; ou
+- for um pagamento de fatura de cartão sem emparelhamento resolvido (`CARD_PAYMENT_UNMATCHED`, ver [07](07-muitas-contas-e-cartoes.md) §4.3); ou
+- tiver categoria com confiança abaixo do limiar (`CATEGORY_LOW_CONFIDENCE`).
+
+Todo o resto entra **pré-selecionado** e é aprovado em bloco.
+
+| Regra | Consequência de projeto |
+| --- | --- |
+| **Cliques constantes** | Aprovar o lote é uma ação, independentemente de 40 ou 40 000 linhas. O que varia é o número de exceções mostradas |
+| **O que a fonte declara não se confirma** | Saldo, total de fatura e contagens são verificados pela máquina; à UI sobe apenas a divergência, com causa explicada |
+| **Nada de contagem proporcional** | Se o número de decisões por lote crescer com o número de linhas, o desenho regrediu (métrica de saúde do ADR-018) |
+
+As vistas **Tabela** e **Diagnóstico** continuam disponíveis para inspeção manual, mas nunca como caminho padrão.
+
+**Nota de contraste.** O ecrã de importação do Actual (`ImportTransactionsModal`) faz o oposto: mostra todas as linhas com seleção e fusão individuais. É bom para inspeção, e por isso é a referência de onde **não** copiar o fluxo — ver [09](09-escopo-vs-actual.md) §6.
+
 Códigos de diagnóstico previstos:
 
 ```

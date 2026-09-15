@@ -1,0 +1,107 @@
+package auth
+
+import "financas/internal/views/layout"
+
+// Setup é o ecrã de primeiro arranque: define a senha.
+//
+// Só existe enquanto não houver credencial. Depois disso, a rota devolve 404 —
+// não há forma de redefinir a senha pela interface (ADR-019).
+templ Setup(erro string, minimo int) {
+	@layout.Base("Definir senha") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<form method="post" action="/primeiro-arranque" class="w-full max-w-sm rounded-nord border border-nord3 bg-nord1 p-6">
+				<h1 class="text-lg font-semibold text-nord6">Definir senha</h1>
+				<p class="mt-1 mb-5 text-sm text-nord4">
+					Esta é a única senha da aplicação. Não há recuperação pela interface: se a perder, troca-se pela linha de comando no servidor.
+				</p>
+
+				if erro != "" {
+					<p class="mb-4 rounded-nord border border-nord11 px-3 py-2 text-sm text-nord11">
+						{ erro }
+					</p>
+				}
+
+				<label for="senha" class="block text-sm text-nord6">Senha</label>
+				<input
+					id="senha"
+					name="senha"
+					type="password"
+					required
+					autofocus
+					autocomplete="new-password"
+					minlength={ minimo }
+					class="tabular mt-1 w-full rounded-nord border border-nord3 bg-nord0 px-3 py-2 text-nord6 outline-none focus:border-nord8"
+				/>
+				<p class="mt-1 mb-4 text-xs text-nord4">
+					Mínimo de { minimo } caracteres.
+				</p>
+
+				<label for="confirmacao" class="block text-sm text-nord6">Repetir a senha</label>
+				<input
+					id="confirmacao"
+					name="confirmacao"
+					type="password"
+					required
+					autocomplete="new-password"
+					minlength={ minimo }
+					class="tabular mt-1 mb-5 w-full rounded-nord border border-nord3 bg-nord0 px-3 py-2 text-nord6 outline-none focus:border-nord8"
+				/>
+
+				<button type="submit" class="w-full cursor-pointer rounded-nord bg-nord10 px-3 py-2 font-medium text-nord6 hover:bg-nord9">
+					Continuar
+				</button>
+			</form>
+		</main>
+	}
+}
+
+// Login é o ecrã de entrada.
+//
+// O campo «quem está a usar» é opcional e serve apenas para o registo de
+// auditoria: não é autenticação, e não há contas separadas (ADR-019).
+templ Login(erro string, nomes []string, destino string) {
+	@layout.Base("Entrar") {
+		<main class="flex min-h-screen items-center justify-center p-6">
+			<form method="post" action="/entrar" class="w-full max-w-sm rounded-nord border border-nord3 bg-nord1 p-6">
+				<h1 class="text-lg font-semibold text-nord6">Finanças</h1>
+				<p class="mt-1 mb-5 text-sm text-nord4">Entre para continuar.</p>
+
+				if erro != "" {
+					<p class="mb-4 rounded-nord border border-nord11 px-3 py-2 text-sm text-nord11">
+						{ erro }
+					</p>
+				}
+
+				<input type="hidden" name="destino" value={ destino }/>
+
+				if len(nomes) > 0 {
+					<label for="ator" class="block text-sm text-nord6">Quem está a usar</label>
+					<select
+						id="ator"
+						name="ator"
+						class="mt-1 mb-4 w-full rounded-nord border border-nord3 bg-nord0 px-3 py-2 text-nord6 outline-none focus:border-nord8"
+					>
+						for _, nome := range nomes {
+							<option value={ nome }>{ nome }</option>
+						}
+					</select>
+				}
+
+				<label for="senha" class="block text-sm text-nord6">Senha</label>
+				<input
+					id="senha"
+					name="senha"
+					type="password"
+					required
+					autofocus
+					autocomplete="current-password"
+					class="tabular mt-1 mb-5 w-full rounded-nord border border-nord3 bg-nord0 px-3 py-2 text-nord6 outline-none focus:border-nord8"
+				/>
+
+				<button type="submit" class="w-full cursor-pointer rounded-nord bg-nord10 px-3 py-2 font-medium text-nord6 hover:bg-nord9">
+					Entrar
+				</button>
+			</form>
+		</main>
+	}
+}

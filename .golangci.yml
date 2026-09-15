@@ -1,0 +1,59 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - exhaustive
+    - gocritic
+    - gosec
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+  # misspell não está ativo de propósito: só conhece inglês e marca como erro
+  # quase todas as palavras dos comentários, que são em português por
+  # convenção do projeto. Um linter que contradiz a convenção de escrita
+  # gera ruído que esconde problemas reais.
+  settings:
+    errcheck:
+      # Fechar recursos em defer não é erro, e o ruído esconde erros reais.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*os.File).Close
+    revive:
+      rules:
+        # Comentários e nomes seguem a convenção do projeto (ver AGENTS.md),
+        # não a exigência de comentário em todo o símbolo exportado.
+        - name: exported
+          disabled: true
+  exclusions:
+    # Ficheiros gerados pelo templ não são revistos como código escrito à mão.
+    generated: lax
+    rules:
+      - path: _templ\.go
+        linters:
+          - gocritic
+          - gosec
+          - revive
+          - unparam
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+          - prealloc
+
+formatters:
+  enable:
+    - gofumpt
+  settings:
+    gofumpt:
+      # Sem extra-rules: `gofumpt -l -w .` (o comando documentado em AGENTS.md
+      # e usado pelo hook) tem de produzir exatamente o que o linter espera.
+      extra-rules: false

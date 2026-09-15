@@ -314,18 +314,26 @@ type RawRow struct {
 
 | Fase | Entrega | Critério de saída |
 | --- | --- | --- |
-| **M0 — Fundação** | Módulo Go, migrações, SQLite, `templ` + HTMX + Tailwind, auth de utilizador único, contas e transações manuais, deploy ARM64 com backup | Consigo registar despesas no telemóvel e restaurar a base de dados de um backup |
-| **M1 — Paridade essencial** | Categorias e grupos, orçamento por envelope com rollover, payees, transferências e splits, busca e filtros | Fecho mensal completo sem folha de cálculo externa |
-| **M2 — Importação V1 + logística** | Adapter CSV genérico, *upload*, pré-visualização, dedupe, *undo* de lote, **roteamento por conteúdo**, **painel de cobertura**, **contas de cartão** | Importo 9 ficheiros numa pasta sem escolher nada, e vejo o que falta importar |
-| **M3 — Automação e cartões** | **Biblioteca de perfis por instituição**, reconciliação de saldo, regras de *payee* brasileiras, **emparelhamento de pagamento de fatura**, IMAP, *cron* | A importação mensal exige uma confirmação, e o cartão deixa de duplicar despesa |
-| **M3.5 — OFX e CAMT.053** | Adapters diretos com `FITID` e roteamento por `ACCTID`/`IBAN` | Contas com OFX deixam de ter qualquer trabalho manual |
-| **M4 — Divisão por cartão e parcelas** | Contas-alvo distintas por linha (titular/adicional), regras de bloco de parceladas | Fatura com adicional importa para duas contas num só lote |
-| **M4.5 — Relatórios e recorrências** | Agendamentos, projeção, cash flow, património líquido, despesa por categoria | Visão consolidada anual sem consultas manuais |
-| **M5 — Polimento** | Atalhos, anexos, TOTP/*passkey*, exportação portável, tema escuro | Uso diário confortável no telemóvel |
+| **M0 — Fundação** | Módulo Go, migrações, SQLite, `templ` + HTMX + Tailwind, tema Nord, **auth por senha única**, deploy ARM64 com backup | Arranco o binário, defino a senha, entro, e a base de dados existe com o esquema completo — ✅ **concluído em 2026-09-15** |
+| **M1 — Importar CSV de ponta a ponta** | Adapter CSV, **um perfil real**, normalização (datas, valores, sinais, *payee*), *staging*, **pré-visualização por exceção**, *commit* + *undo* de lote, motor de regras, dedupe T0–T2 | Importo o CSV do meu banco **com zero decisões**, em menos de um minuto, e desfaço com um clique |
+| **M2 — Muitas contas, cartões e cobertura** | `/data/inbox` + **roteamento por conteúdo**, contas de cartão, **emparelhamento de pagamento de fatura**, reconciliação declarada, **painel de cobertura**, contas-alvo distintas por linha | Largo 9 ficheiros numa pasta sem escolher nada, vejo o que falta importar, e o cartão deixa de contar duas vezes |
+| **M3 — Aprendizagem e perfis** | `payee_mappings` com `hits`/`misses`/`confidence`, **biblioteca de perfis por instituição**, regras de *payee* brasileiras | Depois de dois meses, a maioria dos lançamentos entra categorizada sozinha |
+| **M3.5 — OFX e CAMT.053** | Adapters diretos com `FITID`, `ACCTID` e `IBAN` | Contas com OFX deixam de ter qualquer trabalho manual |
+| **M4 — Orçamento essencial** | Categorias e grupos, orçamento por envelope com *rollover*, transferências e *splits*, busca e filtros | Fecho mensal completo sem folha de cálculo externa |
+| **M4.5 — Entrega automática** | Adapter **IMAP** e `auto_commit` por perfil | Nas contas cobertas pelo email do banco, o mês passa sem *download* manual |
+| **M5 — Polimento** | Atalhos de teclado, exportação portável, *passkeys* opcionais | Uso diário confortável no telemóvel |
 
-Reordenado em 2026-09-14 para atacar primeiro o que reduz trabalho real: **roteamento, cobertura e cartões antes de mais formatos**, e **OFX antes de qualquer novo adapter**. Justificação em [07 §11](07-muitas-contas-e-cartoes.md#11-fases).
+Reordenado em **2026-09-14** para atacar primeiro o que reduz trabalho real: **roteamento, cobertura e cartões antes de mais formatos**, e **OFX antes de qualquer novo adapter**.
+
+Reordenado novamente em **2026-09-15** pelo [ADR-018](05-decisoes-adr.md#adr-018--o-objetivo-primário-é-o-tempo-de-importação): a ordem passa a ser **por minutos devolvidos ao utilizador**, e não por dificuldade técnica ou por paridade funcional. Consequência principal: a **importação sobe para M1** (antes era M2, atrás de categorias e orçamento) e a **aprendizagem e os perfis sobem para M3**.
+
+Duas notas sobre a ordem:
+- **M4 (orçamento) antes de M4.5 (IMAP)** é a única exceção consciente à ordem do ADR-018 §6. O orçamento não reduz tempo de importação, mas é o que torna os dados úteis — sem ele não há razão para importar. Regista-se para não parecer descuido.
+- **Ordem de construção, não de lançamento.** As fatias verticais, o que entra em cada uma e o critério de pronto estão em [10-construcao-e-estrutura.md](10-construcao-e-estrutura.md) §5.
 
 **PDF não tem fase atribuída** — está fora de âmbito ([ADR-016](05-decisoes-adr.md#adr-016--pdf-fora-de-âmbito)). O estudo técnico está preservado em [99-fora-de-ambito-pdf.md](99-fora-de-ambito-pdf.md), caso o tema seja reaberto.
+
+**Agregadores de extratos não têm fase atribuída** — descartados por custo ([ADR-021](05-decisoes-adr.md#adr-021--agregadores-de-extratos-descartados-por-custo)). A entrega automática faz-se por IMAP.
 
 ---
 
